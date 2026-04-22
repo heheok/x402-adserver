@@ -78,14 +78,24 @@ async def execute_settlement(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"campaign not active: {campaign.status}",
         )
+    # `+ 1e-9` tolerance: summing 0.001 many times drifts on the order of
+    # 1e-16 per step, so the "final" play can nominally have remaining == cost
+    # but compare as remaining < cost. Without the tolerance that play is
+    # rejected and the campaign is stuck ACTIVE with unplayable dust.
     remaining = float(campaign.budget) - float(campaign.spent)
-    if remaining < claims.amount_usdc:
+    if remaining + 1e-9 < claims.amount_usdc:
         raise HTTPException(status_code=400, detail="insufficient campaign budget")
 
     # 3. Decrement budget before settling — nonce already claimed, so a retry
-    # can't double-pay even if this request crashes after commit
+    # can't double-pay even if this request crashes after commit. Flip to
+    # COMPLETED the moment the remaining budget can't fund one more play at
+    # this CPM — that's the real "campaign is done" signal. Using "spent >=
+    # budget" would leave uneven budgets (e.g. 0.0035 with 0.001/play) stuck
+    # in ACTIVE with an unspendable dust remainder.
     campaign.spent = float(campaign.spent) + claims.amount_usdc
-    if float(campaign.spent) + 1e-9 >= float(campaign.budget):
+    new_remaining = float(campaign.budget) - float(campaign.spent)
+    play_cost = float(campaign.cpm_price) / 1000.0
+    if new_remaining + 1e-9 < play_cost:
         campaign.status = CampaignStatus.COMPLETED.value
     db.commit()
 

@@ -187,10 +187,13 @@ Leftover state: test campaign `test-camp-s5` and its settlement remain in DB —
 - `frontend/src/components/CampaignsPanel.tsx` + `CampaignCard.tsx` — list + expandable detail.
 
 ### Session 11 — Integration polish
-- [ ] Real devnet end-to-end with judge-like flow
-- [ ] Treasury pre-funded from Circle faucet
-- [ ] Loading states, error toasts, optimistic UI
-- [ ] Balance polling (2s interval during settlement)
+- [x] `lib/errors.humanizeError()` — unwraps FastAPI `{detail}` + our manual x402 throws; applied across all error displays. No more "Request failed with status code 400".
+- [x] Form balance guard — `CreateCampaignForm` reads the cached `["wallet"]` query and disables submit + shows a clear message if `budget > balance`, before the signing attempt.
+- [x] Accurate 3-stage funding progress via instrumented `customFetch` on the x402 client (`preparing` / `signing` / `settling`).
+- [x] Demo auto-play — server-side background loop (`services/auto_play.py`) that, when `AUTO_PLAY_ENABLED=true`, randomly picks one active + funded campaign every `AUTO_PLAY_INTERVAL_SECONDS` (default 15) and runs `execute_settlement` against `DEMO_PUBLISHER_WALLET`. Off by default. Dashboard polls `GET /api/auto-play-status` and shows a pulsing "Auto-simulating…" badge when enabled, plus refetches the campaign list + expanded stats on the same cadence so settlements tick in live. **This is a demo aid only — production publishers drive `/bid` + `/proof` themselves. `AUTO_PLAY_ENABLED` MUST be false in any deployed environment.**
+- [ ] Real devnet end-to-end judge walkthrough — to be done manually
+- [x] Treasury pre-funded from Circle faucet (Session 2)
+- [x] Balance polling during settlement — `lib/walletTrack.ts`, Session 9/10
 
 ### Session 12 — GCP deployment prep
 - [ ] Cloud Run configs (backend)
@@ -249,6 +252,92 @@ Changes (~25%, additive — our service split was built for this swap):
 
 ## Resolved decisions (post-hackathon scope)
 - **Production advertiser auth = API key (decided 2026-04-22).** Third-party ad-tech platforms cannot be forced to adopt Privy. Production `/api/campaigns*` and `/api/wallet` routes will authenticate via `X-API-Key` against a new `advertisers` table. `require_advertiser` (Privy JWT) remains for dev/demo only. Build work is tracked as mainnet blocker §7.2 in `BUSINESS-CONSTRAINTS.md`. `BACKGROUND-INFORMATION.md §Auth` says "Privy or API key" — that ambiguity is now resolved.
+- **Demo-only endpoints/flags that must NOT ship to production (2026-04-22):**
+  - `POST /api/campaigns/:id/simulate-play` — dashboard-only /proof driver (Session 10)
+  - `AUTO_PLAY_ENABLED=true` — server-side auto-play loop (Session 11)
+  - `/api/faucet` — treasury-funded USDC faucet for advertisers (Session 2)
+  - `DEMO_PUBLISHER_WALLET` — hardcoded publisher address for the above
+  All are currently conditionally enabled via settings but none is behind an `environment==dev` guard. **Before Session 12 deploy, wrap each in an `environment in {"dev","staging"}` check or drop from the prod router entirely.** Track as a pre-deploy checklist item.
+
+## Must-fix before mainnet (known correctness issues accepted for the demo)
+
+These are bugs we understand and are deferring with eyes open — at hackathon
+scale (one concurrent user, few campaigns) they don't manifest. Before any
+real-money deployment they MUST be fixed. Raised during a load-behavior
+review 2026-04-22.
+
+### 1. Budget overcommit at `/bid`
+**Symptom:** `_pick_campaign` only requires `remaining >= cpm/1000` (budget
+for one play). With a campaign whose budget covers 20 plays, N concurrent
+`/bid` requests each get a valid `proof_context` JWT for the same campaign
+regardless of N. We've minted N promises we can honor at most 20 of. If
+publishers complete all N plays and call `/proof`, the extras get 400
+`insufficient campaign budget` and write failed settlement rows. We've
+effectively over-issued bid paperwork and dumped the problem on settle time.
+
+**Fix:** reserve budget at `/bid`, release on `proof_context` TTL expiry.
+Either (a) a `pending_bids` table with TTL + settlement cleanup, or
+(b) a `reserved` column on `campaigns` that `/bid` atomically increments and
+`/proof` decrements as it converts to `spent`. Option (b) is simpler if we
+add a periodic sweep to un-reserve expired proof contexts.
+
+### 2. Read-modify-write race on `campaigns.spent` in `execute_settlement`
+**Symptom:** in `app/routers/proof.execute_settlement` we do:
+```python
+remaining = float(campaign.budget) - float(campaign.spent)
+if remaining < claims.amount_usdc: raise 400
+campaign.spent += claims.amount_usdc
+db.commit()
+```
+Under real concurrency (multi-worker uvicorn, busy event loop) two `/proof`
+requests on the same campaign can both read `spent=S`, both pass the guard,
+both set `spent=S+Δ`, and last-write-wins — **one DB row, two on-chain
+settlements**. Campaign wallet actually paid twice but we only charged it
+once. Nonces are safe (unique-constraint insert) but the budget counter is
+not.
+
+**Fix:** atomic decrement with a guard clause, SQL-enforced:
+```sql
+UPDATE campaigns
+SET    spent = spent + :amount
+WHERE  id = :id
+  AND  budget - spent >= :amount
+RETURNING spent, budget
+```
+Reject if `rowcount == 0`. Single statement, safe under any isolation level.
+Do this BEFORE the Privy transfer, not after.
+
+### 3. Money is stored as `float`, not integer microUSDC
+`campaigns.budget`, `campaigns.spent`, and the Python math throughout `/bid`
+`/proof` and `auto_play` all use `float`. Summing `0.001` many times drifts
+on the order of `1e-16` per step, so the "final play" guard can reject a
+semantically-valid play and/or leave unplayable dust in a campaign. Current
+fix (2026-04-22) is `+ 1e-9` epsilon tolerance on every budget guard AND
+flipping `COMPLETED` when `remaining < cost_per_play` (not `spent >= budget`).
+That works for demo scale but is band-aid on top of the real issue.
+
+**Real fix:** store money as integer microUSDC (1 USDC = 1_000_000 units) in
+both the DB (`Integer` columns) and Python. No floats anywhere in the money
+path. Same 6-decimal precision the SPL token mint uses on-chain, and every
+comparison becomes exact integer equality. Eliminates both the
+precision-rejected play and the dust-limbo-ACTIVE states without needing
+tolerance at all.
+
+### 4. Smaller things (same review)
+- **No per-publisher rate limiting** on `/bid` + `/proof`. One publisher can
+  DoS the ad server; mitigate with `slowapi` + Redis or at the reverse-proxy
+  layer.
+- **No auction between campaigns.** FIFO means one campaign takes every bid
+  until drained. Production wants weighted selection (CPM, pacing, targeting).
+- **Single uvicorn worker in dev**. Deploy needs `--workers N` or gunicorn;
+  fix #2 above is a prerequisite since multi-worker exposes the race.
+- **`used_nonces` grows forever.** Fine at demo scale. Add retention (drop
+  rows older than `proof_context_ttl_seconds + grace`) as part of the
+  periodic sweep.
+
+Filed for BUSINESS-CONSTRAINTS §7 (mainnet blockers) cross-reference.
+
+---
 
 ## Open decisions still to resolve
 - Alembic migrations vs `create_all` — skipping Alembic until Postgres in Session 12.
@@ -281,4 +370,5 @@ Changes (~25%, additive — our service split was built for this swap):
 - **2026-04-22 (Session 9 start):** `WalletPanel` implemented — `/api/wallet` query with 400/404 retry for fresh-signup server-side link lag, pulsing "inbound +X USDC, confirming on devnet" indicator that clears when the new balance lands, fallback "Create Solana wallet" button via `useSolanaWallets().createWallet()` for users whose account predates the corrected Solana-only config. Bug fix: `/api/faucet` reference_id now has a uuid suffix — Privy's `reference_id` is validated post-broadcast (duplicate keys still broadcast the tx then error with `invalid_data` at record time), so without the suffix every click after the first returned 502 despite the transfer succeeding. Documented in `BUSINESS-CONSTRAINTS.md §3` and §7 blocker #14 ("Retry safety for non-idempotent on-chain operations"). Comment in `services/privy.py` clarifies why the existing retry loop is still safe (narrow to `transaction_broadcast_failure` which means broadcast did not happen).
 - **2026-04-22 (Session 9 close):** Campaign funding flow shipped end-to-end. `<CreateCampaignForm>` + PayAI's `x402-solana@^2.0.4` auto-handshake against our existing backend. Path getting there cost four trips through the facilitator; each fix documented in Session 9 block above: (1) destination USDC ATA must be pre-created server-side → `build_campaign_bootstrap_tx` bundles SOL seed + ATA create, must confirm before returning 402; (2) x402.org v1 facilitator entry is `solana-devnet`, not CAIP-2; (3) `x402.org/facilitator` 308-redirects to `www.`; (4) `extra.feePayer` must be facilitator's address (Config 2 is the only working path on this stack) — fetched from `/supported` + cached in `get_facilitator_fee_payer()`. Advertiser-SOL-seed branch removed (facilitator pays gas). `lib/walletTrack.ts` shared Zustand store drives `WalletPanel` polling after any money-moving mutation so the debit lands visibly within 2–4s. E2E script (`scripts/e2e_demo.py`) unchanged — still 13/13 on the path that bypasses `/api/campaigns`.
 - **2026-04-22 (Session 10):** Dashboard play + refund flows shipped. Refactored `/proof` to extract `execute_settlement()` as a shared helper; new `POST /api/campaigns/:id/simulate-play` endpoint (advertiser-authed) mints claims server-side and reuses the pipeline so the dashboard can drive the full loop without exposing the publisher API key. Frontend: campaigns now render as a list via new `<CampaignsPanel>` + expandable `<CampaignCard>` — status badges, spent/budget progress bar, per-status actions (simulate/pause/resume/refund), Solscan-linked settlements. `walletTrack.startPolling` is triggered on refund success alongside the existing fund flow. Verified in browser on devnet: create → simulate plays tick up spent + add settlement rows → pause → refund sends remaining USDC back, wallet balance ticks up within a few seconds.
+- **2026-04-22 (Session 11):** Integration polish. `lib/errors.humanizeError()` extracts FastAPI `{detail}` payloads from axios errors and our manual x402 throws; now used across every error display. `CreateCampaignForm` reads the cached wallet query and guards against insufficient-balance submits before reaching the Privy signing popup. Funding progress moved from two stages (with one dead) to three accurate ones via `customFetch` instrumentation on the x402 client. **Demo auto-play**: `app/services/auto_play.py` runs in the FastAPI lifespan when `AUTO_PLAY_ENABLED=true`, ticking every `AUTO_PLAY_INTERVAL_SECONDS` to pick a random active + funded campaign and run `execute_settlement` against `DEMO_PUBLISHER_WALLET`. New public `GET /api/auto-play-status` endpoint drives a pulsing "Auto-simulating…" badge on the dashboard + conditional `refetchInterval` on the campaigns list + expanded stats. Added to .env.example (default off) and to the "demo-only flags MUST NOT ship to prod" list under Resolved decisions.
 - **2026-04-22 (Session 7):** Integration + hardening. `scripts/e2e_demo.py` exercises the full loop against real devnet via in-process ASGI (13/13 steps pass); covers happy path, replay 409, expired 400, paused no-bid, budget-exhaust auto-complete, double-refund guard. Retry stub (`services/retry.py` + `scripts/retry_settlements.py`) drains failed `settlements` rows. Discovered and fixed: (a) `get_usdc_balance` crashed on solana-py's `InvalidParamsMessage` error responses, (b) fresh Privy campaign wallets ended up with 0 SOL (devnet airdrop unreliable) so /proof + refund couldn't pay fees — now SOL-seeded from treasury via `build_sol_transfer_tx`, (c) Privy's simulation RPC lags devnet by 10–60s for new ATAs — added exponential-backoff retry keyed on `transaction_broadcast_failure` inside `sign_and_send_solana`. Structured logging (`logger.exception`) added at every Privy/facilitator boundary.

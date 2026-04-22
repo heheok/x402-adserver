@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     # wallets and the simulate endpoint is disabled.
     demo_publisher_wallet: str = "3pMCrwRq5tNy1GdonrPivP389eYjeeoGTiMZDtQmV8W9"
 
+    # Optional demo aid: server-side background loop that randomly picks an
+    # active, funded campaign and settles a single play against the demo
+    # publisher wallet every `auto_play_interval_seconds`. Off by default —
+    # in production real publishers drive /bid + /proof themselves. See
+    # `app/services/auto_play.py`.
+    auto_play_enabled: bool = False
+    auto_play_interval_seconds: int = 15
+
     # Comma-separated list of allowed browser origins for CORS. The Vite dev
     # server at 5173 is the only caller today; production will add the real
     # dashboard origin once we deploy (Session 12+).

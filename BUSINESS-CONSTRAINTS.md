@@ -333,6 +333,21 @@ commercialize.)
     likely still be safe (retries only on `transaction_broadcast_failure`,
     which Privy only returns when broadcast did not happen), but that
     narrow safety has to be re-audited when Privy's API ships changes.
+15. **Concurrency correctness on `/bid` + `/proof`.** Two known races exist
+    today and are accepted for the hackathon scale (one concurrent user). See
+    `PLAN.md → "Must-fix before mainnet"` for full detail and proposed fixes:
+    - **Budget overcommit at `/bid`**: we mint unbounded `proof_context` JWTs
+      against the same campaign with no reservation. With real publisher
+      concurrency, extras get rejected at settle time as "insufficient budget"
+      and pile up failed settlement rows.
+    - **Read-modify-write race on `campaigns.spent`** in the settlement
+      pipeline: two concurrent `/proof` calls on the same campaign can both
+      pass the budget guard, both increment, and last-write-wins — recording
+      one debit while broadcasting two on-chain transfers. This is a silent
+      campaign-wallet over-drain.
+    Both fixes are engineering-only (single atomic UPDATE with guard clause +
+    a `pending_bids` table or `reserved` column), ~1 session combined. Must
+    land before multi-worker deployment or any third-party publisher access.
 
 ---
 

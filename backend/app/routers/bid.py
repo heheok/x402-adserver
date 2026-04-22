@@ -27,6 +27,12 @@ def _pick_campaign(db: Session) -> Campaign | None:
 
     No auction between campaigns — first-come, first-served. Enough for the
     hackathon; real auction logic is deferred.
+
+    The `+ 1e-9` tolerance forgives float-addition drift — summing 0.001 many
+    times accumulates ~1e-16 of error per step, which can leave `remaining`
+    at 0.000999999… when the semantically-correct answer is "exactly one more
+    play is affordable." Without the tolerance the final play is rejected.
+    Production should track money as integer microUSDC, not float.
     """
     candidates = (
         db.query(Campaign)
@@ -36,7 +42,7 @@ def _pick_campaign(db: Session) -> Campaign | None:
     )
     for c in candidates:
         remaining = float(c.budget) - float(c.spent)
-        if remaining >= _cost_per_play(float(c.cpm_price)):
+        if remaining + 1e-9 >= _cost_per_play(float(c.cpm_price)):
             return c
     return None
 

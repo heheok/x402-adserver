@@ -486,7 +486,7 @@ async def simulate_play(
             detail=f"campaign not active: {c.status}",
         )
     amount = float(c.cpm_price) / 1000.0
-    if float(c.budget) - float(c.spent) < amount:
+    if float(c.budget) - float(c.spent) + 1e-9 < amount:
         raise HTTPException(status_code=400, detail="insufficient campaign budget")
 
     claims = ProofContextClaims(

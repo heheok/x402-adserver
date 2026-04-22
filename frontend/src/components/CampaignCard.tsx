@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { useApi } from "../lib/api";
+import { api, useApi } from "../lib/api";
+import { humanizeError } from "../lib/errors";
 import { solscanAccountUrl, solscanTxUrl, truncateAddress } from "../lib/format";
 import { useWalletTrack } from "../lib/walletTrack";
 
@@ -51,6 +52,8 @@ type RefundResponse = {
   solscan_url: string | null;
 };
 
+type AutoPlayStatus = { enabled: boolean; interval_seconds: number };
+
 const STATUS_LABELS: Record<string, string> = {
   draft: "draft",
   active: "active",
@@ -72,10 +75,19 @@ export default function CampaignCard({
 }: {
   campaign: CampaignSummary;
 }) {
-  const api = useApi();
+  const authedApi = useApi();
   const qc = useQueryClient();
   const startPolling = useWalletTrack((s) => s.startPolling);
   const [expanded, setExpanded] = useState(false);
+
+  const autoPlay = useQuery<AutoPlayStatus>({
+    queryKey: ["auto-play-status"],
+    queryFn: async () => {
+      const r = await api.get<AutoPlayStatus>("/api/auto-play-status");
+      return r.data;
+    },
+    staleTime: 60_000,
+  });
   const [actionError, setActionError] = useState<string | null>(null);
   const [lastSimTx, setLastSimTx] = useState<string | null>(null);
   const [lastRefundTx, setLastRefundTx] = useState<string | null>(null);
@@ -83,12 +95,18 @@ export default function CampaignCard({
   const stats = useQuery<CampaignStats>({
     queryKey: ["campaign-stats", campaign.id],
     queryFn: async () => {
-      const r = await api.get<CampaignStats>(
+      const r = await authedApi.get<CampaignStats>(
         `/api/campaigns/${campaign.id}/stats`,
       );
       return r.data;
     },
     enabled: expanded,
+    // Poll when auto-play is on so the settlements list and plays count
+    // update while the judge watches.
+    refetchInterval:
+      expanded && autoPlay.data?.enabled
+        ? autoPlay.data.interval_seconds * 1000
+        : false,
   });
 
   function invalidateCampaign() {
@@ -98,7 +116,7 @@ export default function CampaignCard({
 
   const simulate = useMutation({
     mutationFn: async () => {
-      const r = await api.post<SimulatePlayResponse>(
+      const r = await authedApi.post<SimulatePlayResponse>(
         `/api/campaigns/${campaign.id}/simulate-play`,
       );
       return r.data;
@@ -108,30 +126,30 @@ export default function CampaignCard({
       setLastSimTx(data.tx_hash);
       invalidateCampaign();
     },
-    onError: (err: Error) => setActionError(err.message),
+    onError: (err: Error) => setActionError(humanizeError(err)),
   });
 
   const pause = useMutation({
     mutationFn: async () => {
-      await api.post(`/api/campaigns/${campaign.id}/pause`);
+      await authedApi.post(`/api/campaigns/${campaign.id}/pause`);
     },
     onMutate: () => setActionError(null),
     onSuccess: invalidateCampaign,
-    onError: (err: Error) => setActionError(err.message),
+    onError: (err: Error) => setActionError(humanizeError(err)),
   });
 
   const resume = useMutation({
     mutationFn: async () => {
-      await api.post(`/api/campaigns/${campaign.id}/resume`);
+      await authedApi.post(`/api/campaigns/${campaign.id}/resume`);
     },
     onMutate: () => setActionError(null),
     onSuccess: invalidateCampaign,
-    onError: (err: Error) => setActionError(err.message),
+    onError: (err: Error) => setActionError(humanizeError(err)),
   });
 
   const refund = useMutation({
     mutationFn: async () => {
-      const r = await api.post<RefundResponse>(
+      const r = await authedApi.post<RefundResponse>(
         `/api/campaigns/${campaign.id}/refund`,
       );
       return r.data;
@@ -145,7 +163,7 @@ export default function CampaignCard({
       // catches up with the transfer.
       startPolling(20_000);
     },
-    onError: (err: Error) => setActionError(err.message),
+    onError: (err: Error) => setActionError(humanizeError(err)),
   });
 
   const pct =

@@ -1,11 +1,15 @@
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSolanaWallets } from "@privy-io/react-auth/solana";
 import { createX402Client } from "x402-solana/client";
 
+import { useApi } from "../lib/api";
+import { humanizeError } from "../lib/errors";
 import { solscanTxUrl, truncateAddress } from "../lib/format";
 import { useWalletTrack } from "../lib/walletTrack";
+
+type WalletInfo = { wallet_address: string; usdc_balance: number };
 
 type CampaignSummary = {
   id: string;
@@ -35,17 +39,28 @@ const DEFAULT_FORM = {
 };
 
 export default function CreateCampaignForm({ onCreated }: Props = {}) {
+  const api = useApi();
   const qc = useQueryClient();
   const { wallets } = useSolanaWallets();
   const { getAccessToken } = usePrivy();
   const startPolling = useWalletTrack((s) => s.startPolling);
+
+  // Re-uses WalletPanel's cache so no extra network request.
+  const wallet = useQuery<WalletInfo>({
+    queryKey: ["wallet"],
+    queryFn: async () => {
+      const r = await api.get<WalletInfo>("/api/wallet");
+      return r.data;
+    },
+    enabled: wallets.length > 0,
+  });
 
   const [form, setForm] = useState(() => ({
     ...DEFAULT_FORM,
     creative_id: `creative-${Math.random().toString(36).slice(2, 10)}`,
   }));
   const [stage, setStage] = useState<
-    "idle" | "creating" | "signing" | "funding"
+    "idle" | "preparing" | "signing" | "settling"
   >("idle");
   const [result, setResult] = useState<CreatedCampaign | null>(null);
 
@@ -55,15 +70,28 @@ export default function CreateCampaignForm({ onCreated }: Props = {}) {
       const token = await getAccessToken();
       if (!token) throw new Error("Not authenticated — sign in again");
 
+      // Instrument the fetch so we can move the stage indicator through the
+      // 402 handshake's real phases. The x402 client calls customFetch twice:
+      // first for the initial POST (bootstrap + 402), then for the retry with
+      // the signed X-PAYMENT payload (facilitator settlement).
+      let fetchIndex = 0;
+      const instrumentedFetch: typeof fetch = async (input, init) => {
+        const idx = fetchIndex++;
+        if (idx === 1) setStage("settling");
+        const response = await fetch(input, init);
+        if (idx === 0) setStage("signing");
+        return response;
+      };
+
       const client = createX402Client({
         wallet: wallets[0],
         network: "solana-devnet",
         // Safety cap — client refuses to sign above this. Pad slightly above
         // our declared budget so float-math doesn't accidentally trip it.
         amount: BigInt(Math.ceil(form.budget * 1.05 * 1e6)),
+        customFetch: instrumentedFetch,
       });
 
-      setStage("signing");
       const res = await client.fetch(`${API_BASE}/api/campaigns`, {
         method: "POST",
         headers: {
@@ -72,8 +100,6 @@ export default function CreateCampaignForm({ onCreated }: Props = {}) {
         },
         body: JSON.stringify(form),
       });
-
-      setStage("funding");
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`Backend ${res.status}: ${text.slice(0, 300)}`);
@@ -99,7 +125,7 @@ export default function CreateCampaignForm({ onCreated }: Props = {}) {
     },
     onMutate: () => {
       setResult(null);
-      setStage("creating");
+      setStage("preparing");
     },
     onSuccess: (data) => {
       setStage("idle");
@@ -122,6 +148,9 @@ export default function CreateCampaignForm({ onCreated }: Props = {}) {
   });
 
   const busy = submit.isPending;
+  const balance = wallet.data?.usdc_balance ?? 0;
+  const insufficientBalance =
+    wallet.data !== undefined && form.budget > balance + 1e-9;
   const canSubmit =
     !busy &&
     wallets.length > 0 &&
@@ -129,15 +158,16 @@ export default function CreateCampaignForm({ onCreated }: Props = {}) {
     form.creative_url.trim().length > 0 &&
     form.creative_id.trim().length > 0 &&
     form.cpm_price > 0 &&
-    form.budget > 0;
+    form.budget > 0 &&
+    !insufficientBalance;
 
   const stageLabel =
-    stage === "creating"
-      ? "Preparing campaign…"
+    stage === "preparing"
+      ? "Creating campaign wallet on devnet (bootstrap + USDC ATA, ~5s)…"
       : stage === "signing"
-        ? "Waiting for wallet signature…"
-        : stage === "funding"
-          ? "Settling on devnet…"
+        ? "Approve the USDC transfer in your wallet popup…"
+        : stage === "settling"
+          ? "Facilitator settling on devnet (~5–10s)…"
           : null;
 
   return (
@@ -250,10 +280,15 @@ export default function CreateCampaignForm({ onCreated }: Props = {}) {
         </div>
       </form>
 
-      {submit.isError && (
+      {insufficientBalance && !submit.isError && (
         <p className="error">
-          {(submit.error as Error).message || "Campaign funding failed"}
+          Budget {form.budget} USDC exceeds your wallet balance of{" "}
+          {balance.toFixed(4)} USDC. Hit "Get test USDC" first.
         </p>
+      )}
+
+      {submit.isError && (
+        <p className="error">{humanizeError(submit.error)}</p>
       )}
 
       {result && (

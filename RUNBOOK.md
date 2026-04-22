@@ -17,7 +17,19 @@ Always run commands from the repo root (`C:\Development\x402`).
 docker compose up -d backend        # start in background
 docker compose logs -f backend      # tail logs
 docker compose down                 # stop everything
-docker compose restart backend      # pick up new .env values
+docker compose restart backend      # pick up CODE changes only (uvicorn --reload does this automatically)
+```
+
+### Pick up new `.env` values (env_file gotcha)
+`docker compose restart` does NOT re-read the `env_file` — it stops and starts
+the existing container with its frozen environment. After editing
+`backend/.env`, recreate the container:
+```bash
+docker compose up -d --force-recreate backend
+```
+Verify with:
+```bash
+docker compose exec backend env | grep VAR_NAME
 ```
 
 ### Rebuild after changing requirements.txt or Dockerfile
@@ -150,6 +162,57 @@ still failing — pipe that into cron/automation if you want.
 
 ---
 
+## Auto-play (demo-only)
+
+Server-side background loop that auto-settles one play every
+`AUTO_PLAY_INTERVAL_SECONDS` on a random active + funded campaign. Only meant
+for the dashboard demo — production publishers drive `/bid` + `/proof`
+themselves. **Must be off in any deployed environment.**
+
+### Enable / disable
+Edit `backend/.env`:
+```
+AUTO_PLAY_ENABLED=true            # or false
+AUTO_PLAY_INTERVAL_SECONDS=15     # tick interval
+DEMO_PUBLISHER_WALLET=<address>   # who receives the settlements
+```
+Then **recreate** the container (restart won't pick up env changes — see the
+env_file gotcha above):
+```bash
+docker compose up -d --force-recreate backend
+```
+
+### Verify it's running
+```bash
+docker compose logs backend | grep auto-play | tail -10
+```
+Expected: one `auto-play loop starting — interval=15s` line, then one
+`auto-play: campaign=... tx=...` line per tick.
+
+### Tail it live
+```bash
+docker compose logs -f backend | grep --line-buffered auto-play
+```
+
+### Check status from the browser / CLI
+```bash
+curl http://localhost:8000/api/auto-play-status
+# → {"enabled":true,"interval_seconds":15}
+```
+The dashboard polls this and shows a pulsing "Auto-simulating…" badge when enabled.
+
+### Behaviour notes
+- Picks at **random** from campaigns with `status=active` AND
+  `remaining >= cpm_price/1000`. Oldest-funded doesn't win; multiple active
+  campaigns all tick along.
+- A campaign drained mid-tick (manual simulate, external `/proof`) will log
+  a harmless `auto-play skipped … status=409` on the next tick that picks it.
+- Failed on-chain settlements land in the `settlements` table with
+  `status=failed` the same way manual ones do — clear with
+  `scripts/retry_settlements.py`.
+
+---
+
 ## Privy sanity check
 
 Confirms the Privy app still has server-wallet access.
@@ -188,17 +251,21 @@ SELECT id, status, budget, spent FROM campaigns;
 
 Set in `backend/.env` (copy from `backend/.env.example` to start).
 
-| Var                       | Purpose                                     | Set in Session |
-| ------------------------- | ------------------------------------------- | -------------- |
-| `PRIVY_APP_ID`            | Privy app credentials                       | 1              |
-| `PRIVY_APP_SECRET`        | Privy app credentials                       | 1              |
-| `TREASURY_WALLET_ID`      | Privy wallet id (after `bootstrap_treasury`)| 2              |
-| `TREASURY_WALLET_ADDRESS` | Solana address of the treasury wallet       | 2              |
-| `FAUCET_AMOUNT_USDC`      | How much USDC the faucet hands out per call | 2              |
-| `PUBLISHER_API_KEY`       | Publisher API key for `/bid` and `/proof`   | 1              |
-| `JWT_SERVER_SECRET`       | Signs `proof_context` tokens                | 1              |
-| `SOLANA_RPC_URL`          | Default: devnet                             | 1              |
-| `X402_FACILITATOR_URL`    | Default: `https://x402.org/facilitator`     | 1              |
+| Var                           | Purpose                                                  | Set in Session |
+| ----------------------------- | -------------------------------------------------------- | -------------- |
+| `PRIVY_APP_ID`                | Privy app credentials                                    | 1              |
+| `PRIVY_APP_SECRET`            | Privy app credentials                                    | 1              |
+| `TREASURY_WALLET_ID`          | Privy wallet id (after `bootstrap_treasury`)             | 2              |
+| `TREASURY_WALLET_ADDRESS`     | Solana address of the treasury wallet                    | 2              |
+| `FAUCET_AMOUNT_USDC`          | How much USDC the faucet hands out per call              | 2              |
+| `PUBLISHER_API_KEY`           | Publisher API key for `/bid` and `/proof`                | 1              |
+| `JWT_SERVER_SECRET`           | Signs `proof_context` tokens                             | 1              |
+| `SOLANA_RPC_URL`              | Default: devnet                                          | 1              |
+| `X402_FACILITATOR_URL`        | Default: `https://www.x402.org/facilitator`              | 1              |
+| `CORS_ALLOW_ORIGINS`          | Comma-separated allowed origins (dashboard)              | 8              |
+| `DEMO_PUBLISHER_WALLET`       | Demo-only: receives plays from `/simulate-play`+auto-play | 10            |
+| `AUTO_PLAY_ENABLED`           | Demo-only: server background loop settles plays (off)    | 11             |
+| `AUTO_PLAY_INTERVAL_SECONDS`  | Auto-play tick interval (default 15)                     | 11             |
 
 ---
 
@@ -206,13 +273,25 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 
 ### `treasury not configured` (503 on `/api/faucet`)
 `TREASURY_WALLET_ID` or `TREASURY_WALLET_ADDRESS` is missing/wrong in `.env`.
-Re-check `docker compose exec backend env | grep TREASURY`, then `docker compose restart backend`.
+Re-check `docker compose exec backend env | grep TREASURY`, then recreate
+(not restart) the container: `docker compose up -d --force-recreate backend`.
 
 ### `PRIVY_APP_ID and PRIVY_APP_SECRET must be set`
 Env not loaded into the container. Check:
 - `backend/.env` exists (not `.env.example`)
 - `docker-compose.yml` has `env_file: ./backend/.env` (it does)
-- Restart: `docker compose restart backend`
+- **Recreate** (not just restart): `docker compose up -d --force-recreate backend`
+
+### `verify failed: fee_payer_not_managed_by_facilitator` (402 on `/api/campaigns` retry)
+The x402-solana client built a tx with a fee-payer that isn't the facilitator's
+managed address. Check that `services/x402.build_payment_requirements` is still
+receiving the facilitator's feePayer (fetched by `get_facilitator_fee_payer()`
+from `GET /supported`) — not the advertiser wallet. See PLAN.md Session 9.
+
+### `No facilitator registered for scheme: exact and network: solana:...`
+Backend is sending the CAIP-2 form of the Solana devnet id against a v1 handshake.
+`services/x402.DEVNET_NETWORK` must be `"solana-devnet"` (short name) for v1 — the
+CAIP-2 form is only registered under v2.
 
 ### Airdrop says rate-limited
 Devnet RPC airdrop is flaky. Use https://faucet.solana.com/ in a browser instead.

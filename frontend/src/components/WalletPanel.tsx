@@ -4,6 +4,7 @@ import { useSolanaWallets } from "@privy-io/react-auth/solana";
 import { isAxiosError } from "axios";
 
 import { useApi } from "../lib/api";
+import { humanizeError } from "../lib/errors";
 import {
   solscanAccountUrl,
   solscanTxUrl,
@@ -122,7 +123,7 @@ export default function WalletPanel() {
       {wallet.isLoading && <p className="muted">Loading…</p>}
       {wallet.isError && !wallet.isFetching && (
         <p className="error">
-          Could not load wallet: {(wallet.error as Error).message}
+          Could not load wallet: {humanizeError(wallet.error)}
         </p>
       )}
 
@@ -166,9 +167,7 @@ export default function WalletPanel() {
       </div>
 
       {faucet.isError && (
-        <p className="error">
-          Faucet failed: {(faucet.error as Error).message}
-        </p>
+        <p className="error">Faucet failed: {humanizeError(faucet.error)}</p>
       )}
       {lastFaucetTx && (
         <p className="footnote muted">

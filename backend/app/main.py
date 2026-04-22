@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .database import init_db
 from .routers import bid, campaigns, health, proof, wallet
+from .services.auto_play import run_auto_play_loop
 
 
 def _configure_logging() -> None:
@@ -24,7 +26,16 @@ def _configure_logging() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    yield
+    stop_event = asyncio.Event()
+    auto_play_task = asyncio.create_task(run_auto_play_loop(stop_event))
+    try:
+        yield
+    finally:
+        stop_event.set()
+        try:
+            await asyncio.wait_for(auto_play_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            auto_play_task.cancel()
 
 
 def create_app() -> FastAPI:

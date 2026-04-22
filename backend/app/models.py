@@ -13,7 +13,6 @@ def _utcnow() -> datetime:
 
 class CampaignStatus(str, Enum):
     DRAFT = "draft"
-    FUNDED = "funded"
     ACTIVE = "active"
     PAUSED = "paused"
     COMPLETED = "completed"
