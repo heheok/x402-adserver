@@ -149,11 +149,25 @@ Leftover state: test campaign `test-camp-s5` and its settlement remain in DB —
 
 **Late-cycle fix-ups (also landed in Session 8):** Privy + Solana in Vite needed the `vite-plugin-node-polyfills` plugin (for `Buffer`/`process`/`global`) plus the `@solana/kit` + `@solana-program/{memo,system,token}` peer-dep stack per Privy's Vite troubleshooting docs. Manual `globalThis.Buffer = Buffer` polyfill in main.tsx didn't work because ES-module hoisting runs Privy imports before the polyfill line. Also: rebuilding the frontend image without `--renew-anon-volumes` preserved the old `node_modules` and silently no-op'd dep updates — documented in frontend README for future dep bumps.
 
-### Session 9 — Dashboard flows (fund)  ← NEXT
-- [ ] Login screen (Privy email)
-- [ ] Wallet panel (address + balance + "Get test USDC" button)
+### Session 9 — Dashboard flows (fund)  ← IN PROGRESS
+- [x] Login screen (Privy email) — done in Session 8 (auth gate routes to `<Login>` when unauthenticated)
+- [x] Wallet panel (address + balance + "Get test USDC" button)
 - [ ] Create campaign form
 - [ ] Fund campaign via `x402-solana/client` (auto 402 handshake)
+
+**Resumption notes (pick up here):**
+- `frontend/src/components/WalletPanel.tsx` is the template for how to structure authed data fetching + mutation panels: `useApi()` + `useQuery` for GET, `useMutation` + `onMutate`/`onSuccess` with `invalidateQueries`, pending-state indicator with pulsing dot. Reuse the same shape for the campaign panel.
+- Next task is `<CreateCampaignForm>` (fields per `backend/app/schemas.CreateCampaignRequest`: name, creative_url, creative_id, cpm_price, budget, duration) + wire the client side of the x402 handshake using `x402-solana/client`. **Before writing any integration code, read the `x402-solana` client docs** (lesson from Session 8 Privy setup — `feedback_sdk_integration_check_docs_first.md`).
+- The backend's `POST /api/campaigns` already returns 402 with PaymentRequirements on first call and processes `X-PAYMENT` on retry (`routers/campaigns.py`). The `x402-solana/client` library handles the 402 interception and retry automatically — we just call it with the Privy Solana wallet as signer.
+- Campaign wallet SOL-seeding from treasury is already built into `create_campaign` (Session 7), so no extra setup needed.
+- `X-PAYMENT-RESPONSE` header is already in CORS `expose_headers` — the client lib can read it.
+- Known x402-solana client package: `x402-solana` on npm. Installed peer deps (`@solana/kit`, `@solana-program/*`) are compatible; browse client usage before coding.
+
+**Gotchas to remember (also in code comments):**
+- Privy `reference_id` is NOT strict pre-broadcast idempotency (see `BUSINESS-CONSTRAINTS.md §3`). Use unique suffixes per-call on faucet/settlement/fund flows.
+- Fresh Privy users only get a Solana embedded wallet if `embeddedWallets.solana.createOnLogin` is set (nested config, not top-level). Existing EVM-wallet users need a manual "Create Solana wallet" button via `useSolanaWallets().createWallet()` — already handled in WalletPanel.
+- Docker + Windows: edits hot-reload only because `vite.config.ts` has `server.watch.usePolling: true`. Don't remove it.
+- Dep bumps need `--renew-anon-volumes` to actually land in the container (documented in `frontend/README.md`).
 
 ### Session 10 — Dashboard flows (play + refund)
 - [ ] "Simulate ad play" button → hits a dev-only endpoint that fires mock `/bid` + `/proof`
@@ -251,4 +265,6 @@ Changes (~25%, additive — our service split was built for this swap):
 - **2026-04-21 (Session 4):** `POST /bid` implemented with FIFO matching + signed `proof_context`. Four curl smokes pass (no-key 401, no-match no-bid, positive bid, budget-exhausted no-bid). `services/tokens` now has working HS256 encode/decode ready for Session 5 proof verification.
 - **2026-04-21 (Session 5):** `POST /proof` implemented end-to-end. First true on-chain test of the pipeline: bid → proof → real USDC transfer on devnet. Tx hash `3i5y7hga…xQ9h` settles 0.0125 USDC treasury → publisher. Replay protection verified (409 on duplicate nonce). DB state consistent across campaigns/used_nonces/settlements.
 - **2026-04-21 (Session 6):** Campaign management — list, detail, stats, settlements, pause, resume, refund. 7 endpoints registered, ownership guards active, Solscan URLs populated. Direct DB stats-query simulation against test-camp-s5 confirms correct shape. Full HTTP lifecycle test deferred to Session 9 (needs Privy JWT).
+- **2026-04-22 (Session 8):** React dashboard scaffold — Vite + React 18 + TS under `frontend/`, Privy React SDK (Solana-only embedded wallets via nested `embeddedWallets.solana.createOnLogin` per Privy Vite docs), vite-plugin-node-polyfills for Buffer/process/global, React Query wired, Zustand installed (no stores yet). Backend CORSMiddleware added, exposes `X-PAYMENT-RESPONSE`. Auth gate → Login ↔ Home. Verified in browser: email OTP → Home with live `/health` response. Branding corrected to "Advertiser Dashboard" with "demo — third-party advertiser view" subtitle.
+- **2026-04-22 (Session 9 start):** `WalletPanel` implemented — `/api/wallet` query with 400/404 retry for fresh-signup server-side link lag, pulsing "inbound +X USDC, confirming on devnet" indicator that clears when the new balance lands, fallback "Create Solana wallet" button via `useSolanaWallets().createWallet()` for users whose account predates the corrected Solana-only config. Bug fix: `/api/faucet` reference_id now has a uuid suffix — Privy's `reference_id` is validated post-broadcast (duplicate keys still broadcast the tx then error with `invalid_data` at record time), so without the suffix every click after the first returned 502 despite the transfer succeeding. Documented in `BUSINESS-CONSTRAINTS.md §3` and §7 blocker #14 ("Retry safety for non-idempotent on-chain operations"). Comment in `services/privy.py` clarifies why the existing retry loop is still safe (narrow to `transaction_broadcast_failure` which means broadcast did not happen).
 - **2026-04-22 (Session 7):** Integration + hardening. `scripts/e2e_demo.py` exercises the full loop against real devnet via in-process ASGI (13/13 steps pass); covers happy path, replay 409, expired 400, paused no-bid, budget-exhaust auto-complete, double-refund guard. Retry stub (`services/retry.py` + `scripts/retry_settlements.py`) drains failed `settlements` rows. Discovered and fixed: (a) `get_usdc_balance` crashed on solana-py's `InvalidParamsMessage` error responses, (b) fresh Privy campaign wallets ended up with 0 SOL (devnet airdrop unreliable) so /proof + refund couldn't pay fees — now SOL-seeded from treasury via `build_sol_transfer_tx`, (c) Privy's simulation RPC lags devnet by 10–60s for new ATAs — added exponential-backoff retry keyed on `transaction_broadcast_failure` inside `sign_and_send_solana`. Structured logging (`logger.exception`) added at every Privy/facilitator boundary.
