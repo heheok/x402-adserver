@@ -5,15 +5,26 @@ No official Python SDK exists; Privy's REST API uses Basic auth
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import logging
 from typing import Any
 
 import httpx
 
 from ..config import Settings, get_settings
 
+logger = logging.getLogger(__name__)
+
 PRIVY_BASE_URL = "https://api.privy.io"
 SOLANA_DEVNET_CAIP2 = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+
+# Privy's simulation RPC can trail devnet for tens of seconds after a funding
+# transfer, returning `transaction_broadcast_failure` with a simulation error
+# even though the on-chain state is fine. We retry that specific code with
+# backoff. Other errors (bad tx, auth, etc.) fail immediately.
+_BROADCAST_RETRY_CODE = "transaction_broadcast_failure"
+_BROADCAST_RETRY_DELAYS = (2, 4, 8, 16)  # total ~30s worst case
 
 
 class PrivyError(RuntimeError):
@@ -43,6 +54,13 @@ class PrivyClient:
     @staticmethod
     def _check(r: httpx.Response) -> dict[str, Any]:
         if r.status_code >= 400:
+            logger.warning(
+                "privy %s %s -> %d: %s",
+                r.request.method,
+                r.request.url.path,
+                r.status_code,
+                r.text[:500],
+            )
             raise PrivyError(r.status_code, r.text)
         return r.json()
 
@@ -71,7 +89,13 @@ class PrivyClient:
         reference_id: str | None = None,
         sponsor: bool = False,
     ) -> str:
-        """Sign + broadcast a pre-built Solana transaction. Returns the tx signature (hash)."""
+        """Sign + broadcast a pre-built Solana transaction. Returns the tx signature (hash).
+
+        Retries `transaction_broadcast_failure` responses with exponential
+        backoff — Privy's simulation read-replica sometimes lags the
+        funding transfer by >30s on fresh wallets. `reference_id`
+        gives us Privy-side idempotency so retries are safe.
+        """
         body: dict[str, Any] = {
             "method": "signAndSendTransaction",
             "caip2": SOLANA_DEVNET_CAIP2,
@@ -82,14 +106,45 @@ class PrivyClient:
         if reference_id:
             body["reference_id"] = reference_id
 
-        async with self._client() as c:
-            r = await c.post(f"/v1/wallets/{wallet_id}/rpc", json=body)
-            data = self._check(r)
+        attempts = [0, *_BROADCAST_RETRY_DELAYS]
+        last_error: PrivyError | None = None
+        for attempt, delay in enumerate(attempts):
+            if delay:
+                logger.info(
+                    "privy sign_and_send retry %d/%d after %ds (wallet=%s ref=%s)",
+                    attempt,
+                    len(attempts) - 1,
+                    delay,
+                    wallet_id,
+                    reference_id,
+                )
+                await asyncio.sleep(delay)
 
-        tx_hash = data.get("hash") or data.get("data", {}).get("hash")
-        if not tx_hash:
-            raise PrivyError(r.status_code, f"no tx hash in response: {data}")
-        return tx_hash
+            async with self._client() as c:
+                r = await c.post(f"/v1/wallets/{wallet_id}/rpc", json=body)
+                if r.status_code >= 400:
+                    logger.warning(
+                        "privy POST %s -> %d: %s",
+                        r.request.url.path,
+                        r.status_code,
+                        r.text[:500],
+                    )
+                    err = PrivyError(r.status_code, r.text)
+                    # Only retry the specific simulation-lag code; everything
+                    # else (auth, malformed tx, rate limit) bails immediately.
+                    if _BROADCAST_RETRY_CODE in (r.text or ""):
+                        last_error = err
+                        continue
+                    raise err
+                data = r.json()
+
+            tx_hash = data.get("hash") or data.get("data", {}).get("hash")
+            if not tx_hash:
+                raise PrivyError(r.status_code, f"no tx hash in response: {data}")
+            return tx_hash
+
+        assert last_error is not None
+        raise last_error
 
     async def get_user(self, user_id: str) -> dict[str, Any]:
         async with self._client() as c:

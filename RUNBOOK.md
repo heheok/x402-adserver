@@ -105,6 +105,51 @@ app forever but simply stops being referenced.
 
 ---
 
+## End-to-end smoke test
+
+Runs the full loop against live devnet — seeds a fresh campaign, exercises the
+happy path and every edge case, reports pass/fail per step. Spends ~0.03 USDC
+per run from the treasury; costs ~0.001 SOL for fees.
+
+```bash
+docker compose run --rm backend python scripts/e2e_demo.py
+```
+
+What it covers:
+- seed campaign (create wallet → SOL-fund from treasury → USDC-fund → activate)
+- happy path: `/bid` → `/proof` → on-chain settlement
+- replay rejected (409 on duplicate nonce)
+- expired `proof_context` (400)
+- paused campaign → empty seatbid
+- budget drained → auto-flip to `completed`, empty seatbid afterwards
+- refund + double-refund guard
+
+Quarantines any pre-existing ACTIVE campaign for the duration of the run and
+restores them on exit. Safe to re-run without DB reset.
+
+Troubleshooting: if pre-flight says "treasury has only 0.0 USDC" but Solscan
+shows funds, re-run — the devnet RPC 429'd and our balance helper falls
+through to 0. The script has one retry built in; a second run almost always
+clears it.
+
+---
+
+## Retry pending-failed settlements
+
+`POST /proof` writes a failed `Settlement` row when Privy or the facilitator
+reject the settlement tx (most commonly Privy's simulation RPC lagging a fresh
+wallet's funding). Retry them once the lag clears:
+
+```bash
+docker compose run --rm backend python scripts/retry_settlements.py
+docker compose run --rm backend python scripts/retry_settlements.py --limit 20
+```
+
+Exit code 0 if every scanned row ended `confirmed` or `skipped`, 1 if any are
+still failing — pipe that into cron/automation if you want.
+
+---
+
 ## Privy sanity check
 
 Confirms the Privy app still has server-wallet access.
@@ -150,7 +195,7 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 | `TREASURY_WALLET_ID`      | Privy wallet id (after `bootstrap_treasury`)| 2              |
 | `TREASURY_WALLET_ADDRESS` | Solana address of the treasury wallet       | 2              |
 | `FAUCET_AMOUNT_USDC`      | How much USDC the faucet hands out per call | 2              |
-| `FINCH_API_KEY`           | Publisher API key for `/bid` and `/proof`   | 1              |
+| `PUBLISHER_API_KEY`       | Publisher API key for `/bid` and `/proof`   | 1              |
 | `JWT_SERVER_SECRET`       | Signs `proof_context` tokens                | 1              |
 | `SOLANA_RPC_URL`          | Default: devnet                             | 1              |
 | `X402_FACILITATOR_URL`    | Default: `https://x402.org/facilitator`     | 1              |

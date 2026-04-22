@@ -10,6 +10,8 @@ from solana.rpc.async_api import AsyncClient
 from solders.message import MessageV0
 from solders.pubkey import Pubkey
 from solders.signature import Signature
+from solders.system_program import TransferParams as SystemTransferParams
+from solders.system_program import transfer as system_transfer
 from solders.transaction import VersionedTransaction
 from spl.token.constants import TOKEN_PROGRAM_ID
 from spl.token.instructions import (
@@ -36,9 +38,13 @@ async def get_usdc_balance(owner_address: str) -> float:
             resp = await client.get_token_account_balance(ata)
         except Exception:
             return 0.0
-        if resp.value is None:
+        # solana-py sometimes returns an RPC error object (e.g.
+        # `InvalidParamsMessage` when the ATA doesn't exist yet) instead of
+        # raising — it has no `.value` attribute.
+        value = getattr(resp, "value", None)
+        if value is None:
             return 0.0
-        return float(resp.value.ui_amount or 0)
+        return float(value.ui_amount or 0)
 
 
 async def get_latest_blockhash_str() -> str:
@@ -92,6 +98,39 @@ async def build_usdc_transfer_tx(
     message = MessageV0.try_compile(
         payer=from_pk,
         instructions=[ata_ix, transfer_ix],
+        address_lookup_table_accounts=[],
+        recent_blockhash=blockhash,
+    )
+    num_sigs = message.header.num_required_signatures
+    tx = VersionedTransaction.populate(message, [Signature.default()] * num_sigs)
+    return base64.b64encode(bytes(tx)).decode()
+
+
+async def build_sol_transfer_tx(
+    from_address: str,
+    to_address: str,
+    lamports: int,
+) -> str:
+    """Build a base64-encoded VersionedTransaction moving native SOL.
+
+    Used to bootstrap new campaign wallets with enough SOL to pay their own
+    fees — RPC devnet airdrops are unreliable, so we transfer from treasury.
+    """
+    settings = get_settings()
+    from_pk = Pubkey.from_string(from_address)
+    to_pk = Pubkey.from_string(to_address)
+
+    ix = system_transfer(
+        SystemTransferParams(from_pubkey=from_pk, to_pubkey=to_pk, lamports=lamports)
+    )
+
+    async with AsyncClient(settings.solana_rpc_url) as client:
+        bh_resp = await client.get_latest_blockhash()
+    blockhash = bh_resp.value.blockhash
+
+    message = MessageV0.try_compile(
+        payer=from_pk,
+        instructions=[ix],
         address_lookup_table_accounts=[],
         recent_blockhash=blockhash,
     )

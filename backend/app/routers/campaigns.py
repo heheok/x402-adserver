@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from ..config import Settings, get_settings
 from ..database import get_db
 from ..dependencies import AdvertiserIdentity, require_advertiser
 from ..models import Campaign, CampaignStatus, Settlement, SettlementStatus
@@ -18,7 +20,14 @@ from ..schemas import (
 )
 from ..services import x402 as x402_service
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
-from ..services.solana import airdrop_sol, build_usdc_transfer_tx
+from ..services.solana import build_sol_transfer_tx, build_usdc_transfer_tx
+
+logger = logging.getLogger(__name__)
+
+# Fresh Privy server wallets start with 0 SOL; devnet RPC airdrops are
+# rate-limited and unreliable. We transfer a small amount from the treasury
+# so the campaign wallet can pay its own tx fees for /proof and refund.
+CAMPAIGN_WALLET_SOL_SEED_LAMPORTS = 10_000_000  # 0.01 SOL, ~2000 default-fee txs
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
@@ -93,6 +102,7 @@ async def create_campaign(
     request: Request,
     advertiser: AdvertiserIdentity = Depends(require_advertiser),
     privy: PrivyClient = Depends(get_privy_client),
+    settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ):
     """
@@ -108,6 +118,7 @@ async def create_campaign(
                 idempotency_key=f"campaign-{advertiser.user_id}-{body.name}-{uuid4().hex[:8]}"
             )
         except PrivyError as e:
+            logger.exception("privy create_solana_wallet failed for advertiser=%s", advertiser.user_id)
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
         campaign = Campaign(
@@ -129,10 +140,26 @@ async def create_campaign(
         db.commit()
         db.refresh(campaign)
 
-        try:
-            await airdrop_sol(wallet["address"], 1.0)
-        except Exception:  # noqa: BLE001
-            pass
+        # Seed SOL from treasury so the campaign wallet can pay its own fees.
+        # Best-effort: if the treasury is misconfigured or the transfer fails
+        # we still return a 402 — the dashboard can surface the problem later
+        # when /proof or refund fails and flip it to a warning.
+        if settings.treasury_wallet_id and settings.treasury_wallet_address:
+            try:
+                sol_tx_b64 = await build_sol_transfer_tx(
+                    from_address=settings.treasury_wallet_address,
+                    to_address=wallet["address"],
+                    lamports=CAMPAIGN_WALLET_SOL_SEED_LAMPORTS,
+                )
+                await privy.sign_and_send_solana(
+                    wallet_id=settings.treasury_wallet_id,
+                    transaction_base64=sol_tx_b64,
+                    reference_id=f"campaign-sol-{wallet['id']}",
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "seed SOL to campaign wallet %s failed", wallet["address"]
+                )
 
         requirements = x402_service.build_payment_requirements(
             amount_usdc=body.budget,
@@ -175,8 +202,14 @@ async def create_campaign(
     try:
         verify_result = await x402_service.verify(payment_payload, requirements)
     except x402_service.X402Error as e:
+        logger.exception("x402 verify failed for campaign=%s", campaign.id)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
     if not verify_result.get("isValid"):
+        logger.warning(
+            "x402 verify invalid campaign=%s reason=%s",
+            campaign.id,
+            verify_result.get("invalidReason"),
+        )
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=f"verify failed: {verify_result.get('invalidReason', 'unknown')}",
@@ -185,8 +218,14 @@ async def create_campaign(
     try:
         settle_result = await x402_service.settle(payment_payload, requirements)
     except x402_service.X402Error as e:
+        logger.exception("x402 settle failed for campaign=%s", campaign.id)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
     if not settle_result.get("success"):
+        logger.warning(
+            "x402 settle unsuccessful campaign=%s reason=%s",
+            campaign.id,
+            settle_result.get("errorReason"),
+        )
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=f"settle failed: {settle_result.get('errorReason', 'unknown')}",
@@ -369,6 +408,7 @@ async def refund_campaign(
             reference_id=f"refund-{c.id}",
         )
     except PrivyError as e:
+        logger.exception("refund failed for campaign=%s wallet=%s", c.id, c.wallet_id)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     c.status = CampaignStatus.REFUNDED.value

@@ -4,7 +4,7 @@ Living document. Updated at the end of every working session.
 
 > **🚀 Resuming work from a cold start? Read this first.**
 >
-> 1. Read `BACKGROUND-INFORMATION.md` for the product spec (read-only reference).
+> 1. Read `BACKGROUND-INFORMATION.md` for the product spec (read-only reference). For commercial/stakeholder questions, see `BUSINESS-CONSTRAINTS.md`.
 > 2. Scan this file's **Session roadmap** below — the first session without ✅ in its heading is where to pick up. Inside each session, the checked boxes tell you what's done.
 > 3. Read `RUNBOOK.md` for every repeated ops task (start/stop, balance checks, funding, resets).
 > 4. Confirm the user has `backend/.env` populated. The treasury vars (`TREASURY_WALLET_ID`, `TREASURY_WALLET_ADDRESS`) come from `scripts/bootstrap_treasury.py`. If they don't exist, bootstrap + fund per RUNBOOK.
@@ -33,7 +33,7 @@ login → faucet → fund (x402) → bid → proof → settle → refund.
 
 Each session is ~1 working block. Order is the dependency chain — later sessions need earlier ones.
 
-### Session 1 — Scaffold + plumbing  ← CURRENT
+### Session 1 — Scaffold + plumbing ✅
 - [x] `PLAN.md` with full roadmap
 - [x] `backend/` layout (app, routers, services, models)
 - [x] FastAPI skeleton with health endpoint
@@ -48,7 +48,7 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 
 **Exit criteria:** `docker compose up backend` serves `GET /health` → 200, `GET /docs` lists all stub endpoints returning 501.
 
-### Session 2 — Privy + wallet endpoints  ← CURRENT
+### Session 2 — Privy + wallet endpoints ✅
 - [x] Add `solana==0.36.6`, `solders==0.23.0` to `requirements.txt`
 - [x] Privy REST client (`services/privy.PrivyClient`) — create, list, get, signAndSend, get_user, fetch_jwks
 - [x] Solana helpers (`services/solana`) — USDC balance, USDC transfer tx builder, devnet SOL airdrop
@@ -62,7 +62,7 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 
 **Privy API validated (2026-04-21):** creation, listing, and `signAndSendTransaction` all documented and exercised. Probe script confirmed full access. Devnet caip2 = `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`. Campaign-wallet reuse helper lives in `PrivyClient.create_solana_wallet()` — Session 3 calls it per campaign.
 
-### Session 3 — x402 campaign creation  ← CURRENT
+### Session 3 — x402 campaign creation ✅
 - [x] `services/x402.py` — `build_payment_requirements`, `build_402_body`, `decode_payment_header`, `verify`, `settle`
 - [x] `POST /api/campaigns` step 1 (no X-PAYMENT): create draft + Privy wallet + airdrop SOL, return 402 with PaymentRequirements body
 - [x] `POST /api/campaigns` step 2 (with X-PAYMENT): decode, look up latest draft, facilitator `/verify` + `/settle`, flip status → `active`
@@ -119,15 +119,21 @@ Leftover state: test campaign `test-camp-s5` and its settlement remain in DB —
 
 **Exit criteria partial:** OpenAPI registers all 7 endpoints, auth gates fire (401 unauth, JWKS-backed 401 on bogus bearer), DB stats query returns expected shape for the Session 5 test campaign (1 play, 0.0125 spent, 0.9875 remaining). **Full lifecycle curl walk (create → fund → play → pause → refund) blocked on a real Privy JWT and deferred to Session 9.**
 
-### Session 7 — Backend integration + hardening
-- [ ] End-to-end integration test script (`scripts/e2e_demo.py`)
-- [ ] Edge cases: expired proof, duplicate nonce, insufficient budget, paused campaign, double refund
-- [ ] Error logging for Privy/facilitator failures
-- [ ] Pending-settlement retry queue stub
+### Session 7 — Backend integration + hardening ✅
+- [x] End-to-end integration test script (`scripts/e2e_demo.py`) — in-process ASGI, 13 steps
+- [x] Edge cases: expired proof, duplicate nonce, insufficient budget, paused campaign, double refund
+- [x] Error logging for Privy/facilitator failures (module loggers + `logger.exception` at every boundary)
+- [x] Pending-settlement retry queue stub (`app/services/retry.py` + `scripts/retry_settlements.py`)
 
-**Exit criteria:** `python scripts/e2e_demo.py` runs the full loop end to end against real devnet.
+**Exit criteria met (2026-04-22):** `docker compose run --rm backend python scripts/e2e_demo.py` → 13/13 steps pass on real devnet.
 
-### Session 8 — React dashboard scaffold
+**Hardening picked up while writing the E2E:**
+- `get_usdc_balance` no longer crashes on solana-py error-response objects (e.g. `InvalidParamsMessage` when the ATA doesn't exist yet).
+- Added retry-with-backoff (2/4/8/16s) to `PrivyClient.sign_and_send_solana` for the `transaction_broadcast_failure` code. Privy's simulation RPC trails devnet by tens of seconds for fresh ATAs; the retry makes /proof robust to that. `reference_id` gives Privy-side idempotency so retries never double-spend.
+- New `services/solana.build_sol_transfer_tx` helper, used in `create_campaign` to seed each fresh campaign wallet with 0.01 SOL from the treasury (RPC airdrops on devnet are rate-limited; the old `airdrop_sol` was best-effort and silently failed, leaving campaign wallets unable to pay their own fees).
+- RUNBOOK typo fix: `FINCH_API_KEY` → `PUBLISHER_API_KEY`. New RUNBOOK sections for the E2E smoke and the retry script.
+
+### Session 8 — React dashboard scaffold  ← NEXT
 - [ ] `frontend/` with Vite + React + TS
 - [ ] Privy React SDK + provider config
 - [ ] API client wrapper (axios + auth header)
@@ -206,11 +212,15 @@ Changes (~25%, additive — our service split was built for this swap):
 
 ---
 
+## Resolved decisions (post-hackathon scope)
+- **Production advertiser auth = API key (decided 2026-04-22).** Third-party ad-tech platforms cannot be forced to adopt Privy. Production `/api/campaigns*` and `/api/wallet` routes will authenticate via `X-API-Key` against a new `advertisers` table. `require_advertiser` (Privy JWT) remains for dev/demo only. Build work is tracked as mainnet blocker §7.2 in `BUSINESS-CONSTRAINTS.md`. `BACKGROUND-INFORMATION.md §Auth` says "Privy or API key" — that ambiguity is now resolved.
+
 ## Open decisions still to resolve
 - Alembic migrations vs `create_all` — skipping Alembic until Postgres in Session 12.
 - Dashboard host port — pinning to 5173 locally; revisit for deploy.
 - Rate limiting on `/api/faucet` — one shot per user per hour? Decide in Session 2.
 - **Decoupling campaign-api from ad-server** (raised 2026-04-21, deferred). Three options sized: Option A = shared DB + two FastAPI apps (~1 session), Option B = independent DBs + internal HTTP (~2–3 sessions, adds network hop to bid path — risky for <500ms target), Option C = event-driven (~3–5 sessions, production-grade). Leaning Option A if we decide to do it; slot between Session 7 and Session 8.
+- **SOL gas subsidy model — MUST resolve before mainnet** (raised 2026-04-22 in Session 7). Today the treasury seeds every new campaign wallet with 0.01 SOL (~$2 on mainnet) so the wallet can pay its own tx fees for `/proof` settlements and refunds. After refund, any unused SOL is stranded forever (Privy has no wallet-delete). Per-play fees are ~5000 lamports. Options: **(A)** Privy fee sponsorship via `sponsor: true` on `sign_and_send_solana` — cleanest, zero SOL seeding, no stranded dust, pricing depends on Privy plan; **(B)** keep subsidy + price it into CPM, accept abandoned-draft loss of $0.40 ATA rent each; **(C)** charge advertiser SOL via a second x402 challenge — blocked by the recursive gas problem (their embedded wallet also starts at 0 SOL, so we'd have to seed theirs too). **Recommendation:** investigate (A) first — it's a one-line flag flip. Whole category evaporates once Solana `upto` ships (see Protocol notes) because campaign wallets go away entirely. Decide before Session 13 (GCP deploy) at latest.
 
 ## Environment / secrets checklist
 - [ ] `PRIVY_APP_ID` (supplied by user)
@@ -232,3 +242,4 @@ Changes (~25%, additive — our service split was built for this swap):
 - **2026-04-21 (Session 4):** `POST /bid` implemented with FIFO matching + signed `proof_context`. Four curl smokes pass (no-key 401, no-match no-bid, positive bid, budget-exhausted no-bid). `services/tokens` now has working HS256 encode/decode ready for Session 5 proof verification.
 - **2026-04-21 (Session 5):** `POST /proof` implemented end-to-end. First true on-chain test of the pipeline: bid → proof → real USDC transfer on devnet. Tx hash `3i5y7hga…xQ9h` settles 0.0125 USDC treasury → publisher. Replay protection verified (409 on duplicate nonce). DB state consistent across campaigns/used_nonces/settlements.
 - **2026-04-21 (Session 6):** Campaign management — list, detail, stats, settlements, pause, resume, refund. 7 endpoints registered, ownership guards active, Solscan URLs populated. Direct DB stats-query simulation against test-camp-s5 confirms correct shape. Full HTTP lifecycle test deferred to Session 9 (needs Privy JWT).
+- **2026-04-22 (Session 7):** Integration + hardening. `scripts/e2e_demo.py` exercises the full loop against real devnet via in-process ASGI (13/13 steps pass); covers happy path, replay 409, expired 400, paused no-bid, budget-exhaust auto-complete, double-refund guard. Retry stub (`services/retry.py` + `scripts/retry_settlements.py`) drains failed `settlements` rows. Discovered and fixed: (a) `get_usdc_balance` crashed on solana-py's `InvalidParamsMessage` error responses, (b) fresh Privy campaign wallets ended up with 0 SOL (devnet airdrop unreliable) so /proof + refund couldn't pay fees — now SOL-seeded from treasury via `build_sol_transfer_tx`, (c) Privy's simulation RPC lags devnet by 10–60s for new ATAs — added exponential-backoff retry keyed on `transaction_broadcast_failure` inside `sign_and_send_solana`. Structured logging (`logger.exception`) added at every Privy/facilitator boundary.

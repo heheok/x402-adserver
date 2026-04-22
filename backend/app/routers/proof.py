@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from uuid import uuid4
 
@@ -15,6 +16,8 @@ from ..schemas import ProofRequest, ProofResponse
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
 from ..services.solana import build_usdc_transfer_tx
 from ..services.tokens import ProofContextError, decode_proof_context
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["rtb"])
 
@@ -113,6 +116,13 @@ async def proof(
             reference_id=f"settlement-{claims.nonce}",
         )
     except (PrivyError, Exception) as e:  # noqa: BLE001
+        logger.exception(
+            "settlement failed campaign=%s nonce=%s publisher=%s amount=%s",
+            campaign.id,
+            claims.nonce,
+            claims.wallet_id,
+            claims.amount_usdc,
+        )
         db.add(
             _settlement_row(
                 campaign_id=campaign.id,

@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..config import Settings, get_settings
@@ -5,6 +7,8 @@ from ..dependencies import AdvertiserIdentity, require_advertiser
 from ..schemas import FaucetResponse, WalletInfo
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
 from ..services.solana import build_usdc_transfer_tx, get_usdc_balance
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["wallet"])
 
@@ -61,6 +65,7 @@ async def faucet(
             reference_id=f"faucet-{advertiser.user_id}",
         )
     except PrivyError as e:
+        logger.exception("faucet failed for advertiser=%s recipient=%s", advertiser.user_id, recipient)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     return FaucetResponse(amount=settings.faucet_amount_usdc, tx_hash=tx_hash)

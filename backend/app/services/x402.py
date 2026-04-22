@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from typing import Any
 
 import httpx
 
 from ..config import get_settings
+
+logger = logging.getLogger(__name__)
 
 USDC_DECIMALS = 6
 X402_VERSION = 1
@@ -74,6 +77,7 @@ async def verify(payment_payload: dict[str, Any], requirements: dict[str, Any]) 
     async with httpx.AsyncClient(timeout=30.0) as c:
         r = await c.post(url, json=body)
         if r.status_code >= 400:
+            logger.warning("x402 verify -> %d: %s", r.status_code, r.text[:500])
             raise X402Error(f"verify {r.status_code}: {r.text}")
         return r.json()
 
@@ -89,5 +93,6 @@ async def settle(payment_payload: dict[str, Any], requirements: dict[str, Any]) 
     async with httpx.AsyncClient(timeout=60.0) as c:
         r = await c.post(url, json=body)
         if r.status_code >= 400:
+            logger.warning("x402 settle -> %d: %s", r.status_code, r.text[:500])
             raise X402Error(f"settle {r.status_code}: {r.text}")
         return r.json()
