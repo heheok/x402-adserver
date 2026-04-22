@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     treasury_wallet_address: str = ""
     faucet_amount_usdc: float = 100.0
 
+    # Comma-separated list of allowed browser origins for CORS. The Vite dev
+    # server at 5173 is the only caller today; production will add the real
+    # dashboard origin once we deploy (Session 12+).
+    cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
 
 @lru_cache
 def get_settings() -> Settings:

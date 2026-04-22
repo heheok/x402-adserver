@@ -15,14 +15,23 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     restart: unless-stopped
 
-  # frontend service lands in Session 8
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #   ports:
-  #     - "5173:5173"
-  #   depends_on:
-  #     - backend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: x402-adserver-frontend
+    ports:
+      - "5173:5173"
+    env_file:
+      - ./frontend/.env
+    volumes:
+      - ./frontend:/app
+      # Anonymous volume keeps the image's node_modules from being shadowed
+      # by the host mount. Rebuild the image when package.json changes.
+      - /app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
 
 volumes:
   backend_data:

@@ -1,4 +1,5 @@
 import logging
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -58,11 +59,16 @@ async def faucet(
         amount_usdc=settings.faucet_amount_usdc,
     )
 
+    # Each click is a separate logical transfer, so the reference_id needs a
+    # unique suffix. Privy rejects duplicate reference_ids with
+    # "A transaction with this reference_id already exists for this app",
+    # which would make the very first click the only one that ever works
+    # for a given user.
     try:
         tx_hash = await privy.sign_and_send_solana(
             wallet_id=settings.treasury_wallet_id,
             transaction_base64=tx_b64,
-            reference_id=f"faucet-{advertiser.user_id}",
+            reference_id=f"faucet-{advertiser.user_id}-{uuid4().hex[:8]}",
         )
     except PrivyError as e:
         logger.exception("faucet failed for advertiser=%s recipient=%s", advertiser.user_id, recipient)

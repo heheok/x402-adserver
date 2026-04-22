@@ -23,6 +23,17 @@ SOLANA_DEVNET_CAIP2 = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
 # transfer, returning `transaction_broadcast_failure` with a simulation error
 # even though the on-chain state is fine. We retry that specific code with
 # backoff. Other errors (bad tx, auth, etc.) fail immediately.
+#
+# RETRY SAFETY — read before widening this list. `reference_id` is NOT a
+# strict pre-broadcast idempotency key: passing the same reference_id twice
+# does not prevent Privy from broadcasting a second on-chain tx (observed
+# 2026-04-22, see BUSINESS-CONSTRAINTS.md §3 + §7). We retry *only* on
+# `transaction_broadcast_failure` because Privy returns that code when the
+# broadcast explicitly did not happen (simulation failed before send), so
+# the retry is the first on-chain attempt — not a duplicate. Do not add
+# retry codes that cover the "we don't know if it went through" case
+# (timeouts, connection resets, HTTP 502 from Privy's gateway) without
+# first adding a pre-flight check against Solana for the tx.
 _BROADCAST_RETRY_CODE = "transaction_broadcast_failure"
 _BROADCAST_RETRY_DELAYS = (2, 4, 8, 16)  # total ~30s worst case
 

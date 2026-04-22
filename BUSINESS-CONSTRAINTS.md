@@ -81,6 +81,17 @@ Things we can't negotiate because they live in vendor policy.
     lock advertisers out of the API surface itself.
 - **No SLA commitments from Privy.** Availability is their problem; we have
   no contractual guarantees.
+- **`reference_id` is NOT strict pre-broadcast idempotency (verified
+  2026-04-22).** Passing the same `reference_id` twice does not prevent the
+  second tx from being broadcast on chain — Privy broadcasts, *then* rejects
+  the duplicate at record time with `invalid_data` "reference_id already
+  exists". Implication: retrying a failed `signAndSendTransaction` with the
+  same `reference_id` can produce a **real duplicate on-chain transfer**, not
+  a safe idempotent replay. Our current retry loop in
+  `services/privy.sign_and_send_solana` is narrow enough (only retries on
+  `transaction_broadcast_failure`, which means Privy explicitly told us the
+  broadcast did not happen) that it should be safe, but this assumption
+  must be re-verified before mainnet — see §7.
 
 ### x402 protocol — facilitator
 - We use `https://x402.org/facilitator` (free, no API keys) for the advertiser
@@ -304,6 +315,24 @@ commercialize.)
 13. **Privy plan upgrade.** Currently on the free/starter plan. Mainnet
     traffic + fee sponsorship likely requires an upgrade. Negotiate before
     commit.
+14. **Retry safety for non-idempotent on-chain operations.** Tied to the
+    Privy `reference_id` quirk documented in §3 — duplicate `reference_id`
+    does not prevent Privy from broadcasting a duplicate tx, so naive
+    "same reference_id on retry" is double-spend-unsafe. Before mainnet we
+    need ONE of:
+    - (A) Confirmation from Privy that pre-broadcast idempotency will be
+      added (ask + get it in writing for our plan)
+    - (B) Our own pre-flight check before every retry: query Solana via
+      `getSignaturesForAddress` on the source wallet for a tx with our
+      known signature / reference tag within the last N blocks, and only
+      retry if nothing shows up
+    - (C) Policy decision: no automatic retry on any wallet-moving call
+      (faucet / settlement / refund / campaign fund). Surface the failure
+      to the caller and let them re-initiate with a fresh key.
+    The existing `sign_and_send_solana` retry loop is narrow enough to
+    likely still be safe (retries only on `transaction_broadcast_failure`,
+    which Privy only returns when broadcast did not happen), but that
+    narrow safety has to be re-audited when Privy's API ships changes.
 
 ---
 
