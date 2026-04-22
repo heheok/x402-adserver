@@ -1,0 +1,34 @@
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# data
+backend/data/
+*.db
+*.sqlite
+
+# node / frontend (created in Session 8)
+node_modules/
+dist/
+.vite/
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# claude code (personal config, permissions, local session state)
+.claude/
