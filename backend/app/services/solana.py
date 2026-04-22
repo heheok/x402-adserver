@@ -4,7 +4,9 @@ Privy signs + broadcasts. We construct the bytes.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import time
 
 from solana.rpc.async_api import AsyncClient
 from solders.message import MessageV0
@@ -45,6 +47,21 @@ async def get_usdc_balance(owner_address: str) -> float:
         if value is None:
             return 0.0
         return float(value.ui_amount or 0)
+
+
+async def get_sol_balance_lamports(address: str) -> int:
+    """Read the native SOL balance (in lamports). Returns 0 on any RPC error."""
+    settings = get_settings()
+    owner = Pubkey.from_string(address)
+    async with AsyncClient(settings.solana_rpc_url) as client:
+        try:
+            resp = await client.get_balance(owner)
+        except Exception:
+            return 0
+    value = getattr(resp, "value", None)
+    if value is None:
+        return 0
+    return int(value)
 
 
 async def get_latest_blockhash_str() -> str:
@@ -104,6 +121,86 @@ async def build_usdc_transfer_tx(
     num_sigs = message.header.num_required_signatures
     tx = VersionedTransaction.populate(message, [Signature.default()] * num_sigs)
     return base64.b64encode(bytes(tx)).decode()
+
+
+async def build_campaign_bootstrap_tx(
+    funder_address: str,
+    beneficiary_address: str,
+    lamports: int,
+) -> str:
+    """Build a single tx that seeds SOL AND initializes the USDC ATA.
+
+    Used when the ad server creates a fresh Privy campaign wallet. The
+    x402-solana client (browser) refuses to build its transfer tx if the
+    destination's USDC ATA doesn't already exist, so we must create it
+    server-side before returning 402. Bundling both steps into one tx
+    keeps us to a single Privy signAndSend + single confirmation wait.
+    """
+    settings = get_settings()
+    funder_pk = Pubkey.from_string(funder_address)
+    beneficiary_pk = Pubkey.from_string(beneficiary_address)
+    mint = Pubkey.from_string(settings.usdc_mint_devnet)
+
+    transfer_ix = system_transfer(
+        SystemTransferParams(
+            from_pubkey=funder_pk, to_pubkey=beneficiary_pk, lamports=lamports
+        )
+    )
+    ata_ix = create_idempotent_associated_token_account(
+        payer=funder_pk,
+        owner=beneficiary_pk,
+        mint=mint,
+    )
+
+    async with AsyncClient(settings.solana_rpc_url) as client:
+        bh_resp = await client.get_latest_blockhash()
+    blockhash = bh_resp.value.blockhash
+
+    message = MessageV0.try_compile(
+        payer=funder_pk,
+        instructions=[transfer_ix, ata_ix],
+        address_lookup_table_accounts=[],
+        recent_blockhash=blockhash,
+    )
+    num_sigs = message.header.num_required_signatures
+    tx = VersionedTransaction.populate(message, [Signature.default()] * num_sigs)
+    return base64.b64encode(bytes(tx)).decode()
+
+
+async def wait_for_tx_confirmation(
+    signature: str, timeout_seconds: float = 30.0
+) -> bool:
+    """Poll getSignatureStatuses until confirmed/finalized or timeout.
+
+    Privy's sign_and_send returns after broadcast, not after finality.
+    Callers that need the state to be visible on-chain before their next
+    RPC call (e.g. the x402 client fetching the ATA we just created) must
+    wait here first. Returns False on timeout; raises on on-chain failure.
+    """
+    settings = get_settings()
+    sig = Signature.from_string(signature)
+    deadline = time.time() + timeout_seconds
+    async with AsyncClient(settings.solana_rpc_url) as c:
+        while time.time() < deadline:
+            try:
+                resp = await c.get_signature_statuses(
+                    [sig], search_transaction_history=True
+                )
+            except Exception:
+                await asyncio.sleep(1)
+                continue
+            value = getattr(resp, "value", None) or []
+            status = value[0] if value else None
+            if status is not None and status.confirmation_status is not None:
+                name = str(status.confirmation_status).lower()
+                if "confirmed" in name or "finalized" in name:
+                    if status.err is not None:
+                        raise RuntimeError(
+                            f"tx {signature} failed on-chain: {status.err}"
+                        )
+                    return True
+            await asyncio.sleep(1)
+    return False
 
 
 async def build_sol_transfer_tx(

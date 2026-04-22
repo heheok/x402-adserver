@@ -28,12 +28,18 @@ class Settings(BaseSettings):
     solana_rpc_url: str = "https://api.devnet.solana.com"
     usdc_mint_devnet: str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
 
-    x402_facilitator_url: str = "https://x402.org/facilitator"
+    x402_facilitator_url: str = "https://www.x402.org/facilitator"
     x402_network: str = "solana-devnet"
 
     treasury_wallet_id: str = ""
     treasury_wallet_address: str = ""
     faucet_amount_usdc: float = 100.0
+
+    # Dev-only default publisher wallet for the "Simulate ad play" button on
+    # the dashboard. The same address used in the E2E smoke (Session 5). In
+    # production real publishers call /bid + /proof themselves with their own
+    # wallets and the simulate endpoint is disabled.
+    demo_publisher_wallet: str = "3pMCrwRq5tNy1GdonrPivP389eYjeeoGTiMZDtQmV8W9"
 
     # Comma-separated list of allowed browser origins for CORS. The Vite dev
     # server at 5173 is the only caller today; production will add the real

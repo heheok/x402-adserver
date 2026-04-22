@@ -67,6 +67,13 @@ class RefundResponse(BaseModel):
     solscan_url: str | None
 
 
+class SimulatePlayResponse(BaseModel):
+    amount_usdc: float
+    tx_hash: str
+    solscan_url: str
+    publisher_wallet: str
+
+
 class BidRequest(BaseModel):
     id: str
     imp: list[dict[str, Any]]

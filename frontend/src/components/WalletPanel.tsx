@@ -9,6 +9,7 @@ import {
   solscanTxUrl,
   truncateAddress,
 } from "../lib/format";
+import { useWalletTrack } from "../lib/walletTrack";
 
 type WalletInfo = { wallet_address: string; usdc_balance: number };
 type FaucetResponse = { amount: number; tx_hash: string };
@@ -20,11 +21,12 @@ export default function WalletPanel() {
   const hasSolanaWallet = wallets.length > 0;
 
   const [lastFaucetTx, setLastFaucetTx] = useState<string | null>(null);
-  const [pollWallet, setPollWallet] = useState(false);
   const [creating, setCreating] = useState(false);
   // "+X USDC inbound" indicator while we wait for devnet confirmation.
   const [pendingAmount, setPendingAmount] = useState<number | null>(null);
   const [balanceBefore, setBalanceBefore] = useState<number | null>(null);
+  const isPolling = useWalletTrack((s) => s.isPolling);
+  const startPolling = useWalletTrack((s) => s.startPolling);
 
   // Only query the backend once Privy has a Solana wallet for this user —
   // otherwise /api/wallet returns 400 (no Solana wallet linked). Also retry
@@ -37,7 +39,7 @@ export default function WalletPanel() {
       return r.data;
     },
     enabled: hasSolanaWallet,
-    refetchInterval: pollWallet ? 2000 : false,
+    refetchInterval: isPolling ? 2000 : false,
     retry: (failureCount, error) => {
       if (failureCount >= 5) return false;
       if (isAxiosError(error)) {
@@ -63,14 +65,8 @@ export default function WalletPanel() {
     onSuccess: (data) => {
       setLastFaucetTx(data.tx_hash);
       setPendingAmount(data.amount);
-      setPollWallet(true);
+      startPolling(20_000);
       qc.invalidateQueries({ queryKey: ["wallet"] });
-      window.setTimeout(() => {
-        setPollWallet(false);
-        // If polling timed out without the balance landing, leave the
-        // pending indicator up until the user refreshes — better than
-        // silently giving up.
-      }, 20_000);
     },
   });
 
@@ -83,7 +79,6 @@ export default function WalletPanel() {
     if (current >= balanceBefore + pendingAmount - 1e-6) {
       setPendingAmount(null);
       setBalanceBefore(null);
-      setPollWallet(false);
     }
   }, [wallet.data?.usdc_balance, pendingAmount, balanceBefore]);
 

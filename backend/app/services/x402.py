@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 
 USDC_DECIMALS = 6
 X402_VERSION = 1
-DEVNET_NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+# x402.org facilitator registers the v1 Solana entry under the short name
+# "solana-devnet" (CAIP-2 `solana:EtWTRAB…` is registered only under v2). The
+# x402-solana client accepts either form interchangeably — see its
+# isSolanaNetwork() — so we use the short name so /verify + /settle work.
+DEVNET_NETWORK = "solana-devnet"
 
 
 class X402Error(RuntimeError):
@@ -66,6 +70,48 @@ def decode_payment_header(x_payment: str) -> dict[str, Any]:
         raise X402Error(f"invalid X-PAYMENT header: {e}") from e
 
 
+_facilitator_fee_payer_cache: str | None = None
+
+
+async def get_facilitator_fee_payer() -> str:
+    """Fetch (and cache) the facilitator's Solana fee-payer address.
+
+    The x402-solana client builds its transfer tx with `payerKey = extra.feePayer`
+    and expects the facilitator to co-sign as fee payer during /settle — so the
+    value we put in PaymentRequirements.extra.feePayer must be the facilitator's
+    own address. Putting anything else yields `fee_payer_not_managed_by_facilitator`.
+
+    The /supported endpoint publishes one entry per (version, scheme, network);
+    we pick v1/exact/solana-devnet and return its `extra.feePayer`.
+    """
+    global _facilitator_fee_payer_cache
+    if _facilitator_fee_payer_cache:
+        return _facilitator_fee_payer_cache
+
+    settings = get_settings()
+    url = f"{settings.x402_facilitator_url.rstrip('/')}/supported"
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as c:
+        r = await c.get(url)
+    if r.status_code >= 300:
+        raise X402Error(f"facilitator /supported {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    kinds = data.get("kinds") or []
+    for k in kinds:
+        if (
+            k.get("x402Version") == X402_VERSION
+            and k.get("scheme") == "exact"
+            and k.get("network") == DEVNET_NETWORK
+        ):
+            fp = (k.get("extra") or {}).get("feePayer")
+            if fp:
+                _facilitator_fee_payer_cache = fp
+                return fp
+    raise X402Error(
+        f"facilitator does not advertise a v{X402_VERSION} exact entry for "
+        f"{DEVNET_NETWORK} with a feePayer"
+    )
+
+
 async def verify(payment_payload: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
     url = f"{settings.x402_facilitator_url.rstrip('/')}/verify"
@@ -74,11 +120,11 @@ async def verify(payment_payload: dict[str, Any], requirements: dict[str, Any]) 
         "paymentPayload": payment_payload,
         "paymentRequirements": requirements,
     }
-    async with httpx.AsyncClient(timeout=30.0) as c:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as c:
         r = await c.post(url, json=body)
-        if r.status_code >= 400:
+        if r.status_code >= 300:
             logger.warning("x402 verify -> %d: %s", r.status_code, r.text[:500])
-            raise X402Error(f"verify {r.status_code}: {r.text}")
+            raise X402Error(f"verify {r.status_code}: {r.text[:500]}")
         return r.json()
 
 
@@ -90,9 +136,9 @@ async def settle(payment_payload: dict[str, Any], requirements: dict[str, Any]) 
         "paymentPayload": payment_payload,
         "paymentRequirements": requirements,
     }
-    async with httpx.AsyncClient(timeout=60.0) as c:
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as c:
         r = await c.post(url, json=body)
-        if r.status_code >= 400:
+        if r.status_code >= 300:
             logger.warning("x402 settle -> %d: %s", r.status_code, r.text[:500])
-            raise X402Error(f"settle {r.status_code}: {r.text}")
+            raise X402Error(f"settle {r.status_code}: {r.text[:500]}")
         return r.json()

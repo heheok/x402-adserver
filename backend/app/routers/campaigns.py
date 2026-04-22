@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -17,10 +18,17 @@ from ..schemas import (
     CreateCampaignRequest,
     RefundResponse,
     SettlementSummary,
+    SimulatePlayResponse,
 )
 from ..services import x402 as x402_service
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
-from ..services.solana import build_sol_transfer_tx, build_usdc_transfer_tx
+from ..services.solana import (
+    build_campaign_bootstrap_tx,
+    build_usdc_transfer_tx,
+    wait_for_tx_confirmation,
+)
+from ..services.tokens import ProofContextClaims
+from .proof import execute_settlement
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +121,12 @@ async def create_campaign(
     advertiser_wallet = await _resolve_advertiser_wallet(advertiser, privy)
 
     if not x_payment:
+        if not (settings.treasury_wallet_id and settings.treasury_wallet_address):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="treasury not configured — run scripts/bootstrap_treasury.py",
+            )
+
         try:
             wallet = await privy.create_solana_wallet(
                 idempotency_key=f"campaign-{advertiser.user_id}-{body.name}-{uuid4().hex[:8]}"
@@ -121,6 +135,37 @@ async def create_campaign(
             logger.exception("privy create_solana_wallet failed for advertiser=%s", advertiser.user_id)
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
+        # Bootstrap the fresh campaign wallet in a single tx: seed SOL (so it
+        # can pay its own fees on /proof + refund) AND create its USDC ATA
+        # (the x402-solana client refuses to build its transfer tx unless the
+        # destination's ATA already exists). Must confirm before returning 402.
+        try:
+            bootstrap_tx_b64 = await build_campaign_bootstrap_tx(
+                funder_address=settings.treasury_wallet_address,
+                beneficiary_address=wallet["address"],
+                lamports=CAMPAIGN_WALLET_SOL_SEED_LAMPORTS,
+            )
+            bootstrap_sig = await privy.sign_and_send_solana(
+                wallet_id=settings.treasury_wallet_id,
+                transaction_base64=bootstrap_tx_b64,
+                reference_id=f"campaign-bootstrap-{wallet['id']}",
+            )
+            confirmed = await wait_for_tx_confirmation(bootstrap_sig, timeout_seconds=45.0)
+            if not confirmed:
+                raise RuntimeError(
+                    f"bootstrap tx {bootstrap_sig} did not confirm in time"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.exception(
+                "bootstrap campaign wallet %s failed", wallet["address"]
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"campaign wallet bootstrap failed: {e}",
+            ) from e
+
+        # Commit the draft only after bootstrap succeeds, so a failed bootstrap
+        # doesn't leave a zombie DRAFT row that the retry path would pick up.
         campaign = Campaign(
             id=str(uuid4()),
             advertiser_id=advertiser.user_id,
@@ -140,32 +185,20 @@ async def create_campaign(
         db.commit()
         db.refresh(campaign)
 
-        # Seed SOL from treasury so the campaign wallet can pay its own fees.
-        # Best-effort: if the treasury is misconfigured or the transfer fails
-        # we still return a 402 — the dashboard can surface the problem later
-        # when /proof or refund fails and flip it to a warning.
-        if settings.treasury_wallet_id and settings.treasury_wallet_address:
-            try:
-                sol_tx_b64 = await build_sol_transfer_tx(
-                    from_address=settings.treasury_wallet_address,
-                    to_address=wallet["address"],
-                    lamports=CAMPAIGN_WALLET_SOL_SEED_LAMPORTS,
-                )
-                await privy.sign_and_send_solana(
-                    wallet_id=settings.treasury_wallet_id,
-                    transaction_base64=sol_tx_b64,
-                    reference_id=f"campaign-sol-{wallet['id']}",
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "seed SOL to campaign wallet %s failed", wallet["address"]
-                )
+        try:
+            facilitator_fee_payer = await x402_service.get_facilitator_fee_payer()
+        except x402_service.X402Error as e:
+            logger.exception("facilitator fee payer lookup failed")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
+            ) from e
 
         requirements = x402_service.build_payment_requirements(
             amount_usdc=body.budget,
             pay_to_address=wallet["address"],
             resource_url=str(request.url),
             description=f"Fund campaign {body.name}",
+            fee_payer=facilitator_fee_payer,
         )
         return JSONResponse(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -192,11 +225,20 @@ async def create_campaign(
             detail="no draft campaign found to fund — call without X-PAYMENT first",
         )
 
+    try:
+        facilitator_fee_payer = await x402_service.get_facilitator_fee_payer()
+    except x402_service.X402Error as e:
+        logger.exception("facilitator fee payer lookup failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
+        ) from e
+
     requirements = x402_service.build_payment_requirements(
         amount_usdc=float(campaign.budget),
         pay_to_address=campaign.wallet_address,
         resource_url=str(request.url),
         description=f"Fund campaign {campaign.name}",
+        fee_payer=facilitator_fee_payer,
     )
 
     try:
@@ -419,4 +461,47 @@ async def refund_campaign(
         refund_amount=remaining,
         tx_hash=tx_hash,
         solscan_url=_solscan_tx_url(tx_hash),
+    )
+
+
+@router.post("/{campaign_id}/simulate-play", response_model=SimulatePlayResponse)
+async def simulate_play(
+    campaign_id: str,
+    advertiser: AdvertiserIdentity = Depends(require_advertiser),
+    privy: PrivyClient = Depends(get_privy_client),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+) -> SimulatePlayResponse:
+    """Dashboard-only helper: mint a proof_context server-side and settle it.
+
+    Production publishers call /bid + /proof themselves with their own API key;
+    this endpoint exists so the demo dashboard can drive an end-to-end "ad played"
+    event without exposing the publisher API key in the browser. Ownership of the
+    campaign is required (same auth as the rest of /api/campaigns).
+    """
+    c = _owned_campaign(db, campaign_id, advertiser)
+    if c.status != CampaignStatus.ACTIVE.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"campaign not active: {c.status}",
+        )
+    amount = float(c.cpm_price) / 1000.0
+    if float(c.budget) - float(c.spent) < amount:
+        raise HTTPException(status_code=400, detail="insufficient campaign budget")
+
+    claims = ProofContextClaims(
+        campaign_id=c.id,
+        bid_id=f"simulate-{uuid4().hex[:8]}",
+        wallet_id=settings.demo_publisher_wallet,
+        nonce=f"simulate-{uuid4().hex}",
+        created_at=int(time.time()),
+        amount_usdc=amount,
+    )
+
+    tx_hash = await execute_settlement(claims, db, privy)
+    return SimulatePlayResponse(
+        amount_usdc=amount,
+        tx_hash=tx_hash,
+        solscan_url=_solscan_tx_url(tx_hash) or "",
+        publisher_wallet=settings.demo_publisher_wallet,
     )

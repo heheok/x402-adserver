@@ -1,5 +1,6 @@
 import { usePrivy } from "@privy-io/react-auth";
 
+import CampaignsPanel from "../components/CampaignsPanel";
 import WalletPanel from "../components/WalletPanel";
 
 export default function Home() {
@@ -22,13 +23,7 @@ export default function Home() {
 
       <main className="content">
         <WalletPanel />
-
-        <section className="card">
-          <h2>Campaigns</h2>
-          <p className="muted">
-            Coming up: create + fund via x402, simulate plays, refund.
-          </p>
-        </section>
+        <CampaignsPanel />
       </main>
     </div>
   );
