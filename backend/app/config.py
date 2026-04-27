@@ -61,6 +61,19 @@ class Settings(BaseSettings):
     # dashboard origin once we deploy (Session 12+).
     cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # GCS bucket for advertiser-uploaded creatives (Session 13). Bucket has
+    # uniform bucket-level access + allUsers:objectViewer so the URL is
+    # publicly readable; service account only needs roles/storage.objectCreator.
+    # See PLAN.md Session 13 + BUSINESS-CONSTRAINTS.md §5 (creative hosting).
+    gcs_bucket_name: str = ""
+    gcs_credentials_json: str = ""
+
+    # Hard caps for the upload (re-validated server-side regardless of what the
+    # browser claims). 1920x1080 is the demo publisher's only supported format.
+    creative_max_bytes: int = 5 * 1024 * 1024
+    creative_required_width: int = 1920
+    creative_required_height: int = 1080
+
 
 @lru_cache
 def get_settings() -> Settings:

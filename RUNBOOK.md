@@ -249,6 +249,60 @@ The dashboard polls this and shows a pulsing "Auto-simulating…" badge when ena
 
 ---
 
+## Creative uploads (GCS)
+
+Advertiser creatives uploaded via the dashboard wizard land in a public-read
+GCS bucket. The bucket and a dedicated upload-only service account are
+provisioned once per environment.
+
+### One-time provisioning (CMD)
+```cmd
+gcloud config set project x402-494608
+
+gcloud storage buckets create gs://x402-adserver-creatives --location=us-central1 --uniform-bucket-level-access
+
+gcloud storage buckets add-iam-policy-binding gs://x402-adserver-creatives --member=allUsers --role=roles/storage.objectViewer
+
+gcloud iam service-accounts create x402-creatives-uploader
+
+gcloud storage buckets add-iam-policy-binding gs://x402-adserver-creatives --member="serviceAccount:x402-creatives-uploader@x402-494608.iam.gserviceaccount.com" --role=roles/storage.objectCreator
+
+if not exist backend\.secrets mkdir backend\.secrets
+gcloud iam service-accounts keys create backend\.secrets\gcs-creatives-sa.json --iam-account=x402-creatives-uploader@x402-494608.iam.gserviceaccount.com
+```
+
+Bucket names are globally unique — if `x402-adserver-creatives` is taken, suffix
+it (e.g. `x402-adserver-creatives-494608`) and update `GCS_BUCKET_NAME` to match.
+
+### `.env` lines
+```
+GCS_BUCKET_NAME=x402-adserver-creatives
+GCS_CREDENTIALS_JSON=/app/.secrets/gcs-creatives-sa.json
+```
+The path is the **container** path. `docker-compose.yml` mounts
+`./backend/.secrets` to `/app/.secrets` read-only.
+
+After editing `.env`: `docker compose up -d --force-recreate backend`.
+
+### Sanity check
+```bash
+curl -F "file=@/path/to/1920x1080.jpg" \
+     -H "Authorization: Bearer <privy-jwt>" \
+     http://localhost:8000/api/creatives
+```
+Expected: `{"creative_id":"...","creative_url":"https://storage.googleapis.com/<bucket>/creatives/<uuid>.jpg",...}`.
+The URL must open in a browser without auth.
+
+### Rotate the SA key
+```cmd
+gcloud iam service-accounts keys create backend\.secrets\gcs-creatives-sa.json --iam-account=x402-creatives-uploader@x402-494608.iam.gserviceaccount.com
+```
+Then `docker compose up -d --force-recreate backend` to pick up the new file
+(actually a restart suffices since the file path doesn't change, but recreate
+is the safe default we use everywhere).
+
+---
+
 ## Privy sanity check
 
 Confirms the Privy app still has server-wallet access.
@@ -304,6 +358,8 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 | `DEMO_PUBLISHER_WALLET`       | Demo-only: receives plays from `/simulate-play`+auto-play | 10            |
 | `AUTO_PLAY_ENABLED`           | Demo-only: server background loop settles plays (off)    | 11             |
 | `AUTO_PLAY_INTERVAL_SECONDS`  | Auto-play tick interval (default 15)                     | 11             |
+| `GCS_BUCKET_NAME`             | Public-read GCS bucket for advertiser creatives          | 13             |
+| `GCS_CREDENTIALS_JSON`        | Container path to GCS service-account JSON               | 13             |
 
 ---
 

@@ -13,6 +13,7 @@ venv/
 .env
 .env.*
 !.env.example
+backend/.secrets/
 
 # data
 backend/data/
