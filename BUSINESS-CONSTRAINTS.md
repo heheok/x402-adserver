@@ -8,7 +8,7 @@ Pairs with `BACKGROUND-INFORMATION.md` (product spec + architectural rationale)
 and `PLAN.md` (engineering roadmap + open decisions). When figures here disagree
 with those, treat `PLAN.md` as truth and flag the drift.
 
-Last reviewed: 2026-04-22.
+Last reviewed: 2026-04-24.
 
 ---
 
@@ -40,10 +40,11 @@ Solana devnet where on-chain cost is $0.
 | Refund fee                            | ~5,000 lamports (~$0.001) | **Treasury (us)** | Same pool. |
 | Per-play USDC payout to publisher     | `CPM / 1000`        | **Advertiser**   | E.g. a $12.50 CPM → $0.0125 per play. This is revenue flowing through, not a cost. |
 | x402 facilitator fee                  | $0 on `x402.org`    | —                | Free today on the hackathon facilitator. CDP facilitator has a free tier of 1,000 tx/month, then their pricing. |
+| Protocol fee (revenue, upfront)       | 2.5% of campaign total | **Advertiser** | Charged upfront — `total to escrow = budget + fee`. After x402 settle pulls `budget+fee` into the campaign wallet, an immediate Privy transfer moves the 2.5% from the campaign wallet to a dedicated `PROTOCOL_REVENUE_WALLET` (separate from treasury). Non-refundable — refund only returns `budget - spent`, fee is gone. New `Campaign.protocol_fee_amount` column tracks it. Decided 2026-04-24, see §6. |
 
-**Bottom line per campaign:** ~$2 of fixed overhead + ~$0.001 per play, all
-currently absorbed by us. On devnet this is free, on mainnet it is real
-money.
+**Bottom line per campaign:** ~$2 of fixed overhead + ~$0.001 per play
+absorbed by us; advertiser pays campaign budget + 2.5% protocol fee on top.
+On devnet this is free, on mainnet the protocol fee is our revenue.
 
 **Abandoned-draft cost:** every campaign that hits `draft` and is never funded
 still cost us ~$0.40 of ATA rent. Something to monitor for fraud / spam / real
@@ -61,6 +62,19 @@ Things we can't negotiate because they live in vendor policy.
   at most 200 advertisers per 2h window at the current 0.1 USDC demo faucet
   amount. Hackathon-only concern; goes away on mainnet (advertisers bring
   their own USDC).
+- **Programmatic `/v1/faucet/drips` is gated (verified 2026-04-24).** Sandbox
+  API keys cannot call the drips endpoint — `POST api.circle.com/v1/faucet/drips`
+  with a `TEST_API_KEY:...` bearer returns `403 {"code":3,"message":"Forbidden"}`.
+  The docs line *"Calling the /v1/faucet/drips API requires upgrading to
+  mainnet"* maps to a real account-level KYC/business-verification gate. We
+  have not pursued the upgrade for the hackathon. **Workaround in use:** N
+  helper Privy server wallets bootstrapped alongside treasury, each
+  individually claims 20 USDC every 2h via the public web faucet at
+  `faucet.circle.com` (manual, captcha-gated — cannot be safely automated),
+  then `scripts/sweep_helpers.py` consolidates to treasury. With 3 helpers +
+  once-daily clicks the treasury earns ~60 USDC/day; with twice-daily ~120
+  USDC/day. Mainnet has no equivalent — this entire problem disappears once
+  advertisers bring their own USDC. Tracked as Session 12.
 
 ### Privy
 - **No wallet deletion.** Every campaign wallet we create lives forever. ATA
@@ -194,6 +208,41 @@ before refund execution. None are built today.
 Everything else in the API (`/bid`, `/proof`, `/api/campaigns*`, `/api/wallet`)
 is the production surface.
 
+### Creative hosting (added 2026-04-24)
+
+In the demo, advertisers upload a campaign image via the wizard; the file
+lands in `gs://x402-adserver-creatives/creatives/{uuid}.{ext}` with
+public-read access (`allUsers:objectViewer`). The campaign's `creative_url`
+column points at that GCS object.
+
+**This endpoint exists in production too** — third-party advertisers will
+need somewhere to put creatives the publisher can fetch and play, so
+creative hosting is not strictly demo-only. Implications:
+
+- We are now in the loop on creative content. A third party could upload
+  anything — illegal, infringing, malicious — and our public bucket serves
+  it on partner publisher screens.
+- Bucket is intentionally public-read. Locking creatives behind signed URLs
+  is doable but imposes auth coupling on the publisher network we don't
+  want to introduce today.
+- Upload constraints enforced: JPG/PNG only, exactly 1920×1080, max ~5 MB.
+  Validated client-side AND server-side (Pillow). Browsers can be bypassed;
+  trust nothing from the client.
+- Pre-mainnet content moderation is a real blocker (§7.16).
+
+### Inventory transparency (added 2026-04-24)
+
+`GET /api/markets` (advertiser-authed) returns per-DMA display counts
+derived from `backend/data/venues.json` (a flattened export of the
+publisher's `companies` + `screens` Mongo collections). Today this is the 6
+DMAs of our single demo publisher (NY / LA / SF / Miami / Austin / Boston).
+
+In production with multiple publishers this means every authenticated
+advertiser can read every publisher's inventory composition (size, by
+market). Probably not a competitive risk — these counts are advertised
+publicly by panel operators anyway — but worth knowing before onboarding
+the first publisher who treats inventory size as proprietary.
+
 ---
 
 ## 6. Risk-owned decisions (still open)
@@ -231,6 +280,39 @@ here with business framing.
 - **What:** today `/api/faucet` will serve as often as called. Needs a
   per-user per-hour cap before we demo publicly to prevent treasury drain.
 - **Status:** noted as a Session 2 leftover, currently not gated.
+
+### Demo CPM lock (decided 2026-04-24)
+- **What:** demo CPM is fixed at **$0.50** ($0.0005/play, 500 base units of
+  USDC) via `DEMO_CPM` env var, with no UI lever for advertisers.
+- **Why:** chosen so the most expensive demo configuration fits inside the
+  20 USDC / 2h Circle faucet ceiling. Full-fat selection (all 6 DMAs × 7
+  days) lands at ~$232 to escrow at this rate — not affordable on a single
+  faucet hit, so advertisers will naturally select a subset. Typical demo
+  flow (1–3 DMAs × 2–7 days) lands at $15–$20, fundable from 1–2 faucet
+  pulls.
+- **External-facing:** real-world DOOH CPMs are $5–$100. When discussing
+  pricing publicly, do **NOT** cite $0.50 as our rate — it's a faucet-driven
+  artifact of the devnet demo, not a price point.
+- **Re-evaluate:** when migrating to mainnet, replace `DEMO_CPM` env with
+  either a per-publisher floor or a true bid-up auction model.
+
+### Protocol fee model (decided 2026-04-24)
+- **Rate:** 2.5% of the campaign total (`fee = budget × 0.025`), charged
+  upfront. Advertiser pays `budget + fee` into the campaign wallet at
+  funding time; an immediate Privy transfer moves the fee from the campaign
+  wallet to a dedicated `PROTOCOL_REVENUE_WALLET` (its own Privy server
+  wallet, separate from treasury).
+- **Why upfront, not per-play:** simpler — one fee transfer per campaign, not
+  per play. Doubling on-chain ops at every settlement isn't worth the
+  marginal accounting honesty.
+- **Why a separate wallet from treasury:** treasury = faucet source;
+  protocol-revenue = fee sink. Cleaner narrative + cleaner accounting.
+  Solscan shows two distinct addresses doing two distinct jobs.
+- **Recoverability:** protocol fee is **non-refundable**. Refund only
+  returns `budget - spent` from the campaign wallet, not the fee.
+  Advertiser-facing UX must make this clear at the calculator step.
+- **Schema:** new `Campaign.protocol_fee_amount` column tracks the fee taken
+  on each campaign for clean reconciliation.
 
 ---
 
@@ -348,6 +430,16 @@ commercialize.)
     Both fixes are engineering-only (single atomic UPDATE with guard clause +
     a `pending_bids` table or `reserved` column), ~1 session combined. Must
     land before multi-worker deployment or any third-party publisher access.
+16. **Creative content moderation.** Once advertisers can upload creatives
+    to our public GCS bucket (§5 Creative hosting), we are responsible for
+    what gets served on partner publisher screens. Today: zero filtering
+    beyond MIME + dimension validation. Pre-mainnet, at minimum: an
+    NSFW/safety classifier on upload (Sightengine, AWS Rekognition Content
+    Moderation, or similar managed API), a manual review queue for flagged
+    items, and a takedown path for post-publication complaints. Ideally
+    per-publisher brand-safety rules layered on top. Cost depends on
+    managed-API choice — back-of-envelope $0.001–$0.005 per upload at
+    Rekognition/Sightengine pricing, manageable.
 
 ---
 

@@ -186,28 +186,81 @@ Leftover state: test campaign `test-camp-s5` and its settlement remain in DB —
 - `backend/app/routers/campaigns.simulate_play` — dashboard-only /proof driver, uses `settings.demo_publisher_wallet`.
 - `frontend/src/components/CampaignsPanel.tsx` + `CampaignCard.tsx` — list + expandable detail.
 
-### Session 11 — Integration polish
+### Session 11 — Integration polish ✅
 - [x] `lib/errors.humanizeError()` — unwraps FastAPI `{detail}` + our manual x402 throws; applied across all error displays. No more "Request failed with status code 400".
 - [x] Form balance guard — `CreateCampaignForm` reads the cached `["wallet"]` query and disables submit + shows a clear message if `budget > balance`, before the signing attempt.
 - [x] Accurate 3-stage funding progress via instrumented `customFetch` on the x402 client (`preparing` / `signing` / `settling`).
 - [x] Demo auto-play — server-side background loop (`services/auto_play.py`) that, when `AUTO_PLAY_ENABLED=true`, randomly picks one active + funded campaign every `AUTO_PLAY_INTERVAL_SECONDS` (default 15) and runs `execute_settlement` against `DEMO_PUBLISHER_WALLET`. Off by default. Dashboard polls `GET /api/auto-play-status` and shows a pulsing "Auto-simulating…" badge when enabled, plus refetches the campaign list + expanded stats on the same cadence so settlements tick in live. **This is a demo aid only — production publishers drive `/bid` + `/proof` themselves. `AUTO_PLAY_ENABLED` MUST be false in any deployed environment.**
-- [ ] Real devnet end-to-end judge walkthrough — to be done manually
+- [x] Real devnet end-to-end judge walkthrough (user ran manually 2026-04-22)
 - [x] Treasury pre-funded from Circle faucet (Session 2)
 - [x] Balance polling during settlement — `lib/walletTrack.ts`, Session 9/10
 
-### Session 12 — GCP deployment prep
+### Session 12 — Treasury topup helpers (multi-wallet workaround)
+- [ ] Extend `bootstrap_treasury.py` to create N helper Privy server wallets (default 3); persist IDs/addresses to `.env` as `HELPER_WALLET_IDS` + `HELPER_WALLET_ADDRESSES` (comma-separated)
+- [ ] One-time SOL airdrop (~0.01 SOL) per helper so they can pay fees on sweep transfers
+- [ ] `scripts/sweep_helpers.py` — for each helper: read USDC balance, if non-zero, signAndSend USDC transfer to `TREASURY_WALLET_ADDRESS`, log result
+- [ ] `RUNBOOK.md` daily-routine section: open `faucet.circle.com`, paste each helper address in turn, click claim, then `python scripts/sweep_helpers.py`. ~2 minutes/day.
+- [ ] Optional probe of Circle account-upgrade flow in parallel — if it lands during the hackathon window, swap manual sweep for a programmatic 2h cron.
+
+**Why this is first:** lead time matters. Every day we don't run the helper-claim routine is ~60 USDC of foregone treasury runway. Ship this before the wizard work so it's accumulating in the background.
+
+**Why multi-wallet manual:** Circle programmatic `/v1/faucet/drips` returns HTTP 403 for sandbox keys (verified 2026-04-24) — the docs' "requires upgrading to mainnet" line maps to a real account-level KYC gate. Public web faucet is captcha-gated so cannot be safely automated. Per-address rate limit (20 USDC / 2h) is the documented Circle policy, so N independent addresses give N × 20 USDC per cycle.
+
+**Exit criteria:** `python scripts/sweep_helpers.py` moves USDC from any non-empty helper into the treasury and logs tx hashes. RUNBOOK has the click sequence. Treasury balance visibly grows day-over-day.
+
+### Session 13 — Wizard shell + creative image upload (Feature 1)
+- [ ] Refactor `CreateCampaignForm.tsx` into a wizard shell with step indicator + back/next; closing the modal discards state (no draft persistence between steps)
+- [ ] **Step 1 — Image**: file picker (JPG/PNG only), client-side validation via `Image()` constructor (must be exactly 1920×1080), preview thumbnail, upload-on-next
+- [ ] Backend: `POST /api/creatives` (multipart, advertiser-authed). Re-validates with Pillow (don't trust browser). Uploads to `gs://x402-adserver-creatives/creatives/{uuid}.{ext}`. Returns `{creative_url, creative_id}` (URL is plain GCS public URL; id is the uuid).
+- [ ] Bucket setup: uniform bucket-level access + `allUsers:objectViewer` so URL is publicly readable with no auth
+- [ ] Service account JSON in `backend/.env` for dev (`GCS_CREDENTIALS_JSON` path); Workload Identity in deploy session
+- [ ] Drop `creative_url` and `creative_id` text inputs from the form (replaced by upload step output)
+- [ ] No schema change to `models.Campaign` — existing `creative_url` + `creative_id` columns receive the upload result on submit
+
+**Exit criteria:** advertiser uploads a 1920×1080 JPG, wizard advances showing the thumbnail, campaign row's `creative_url` points at a public GCS object that opens in a browser.
+
+### Session 14 — DMA targeting + scheduling (Features 2 + 3 + 4)
+- [ ] Mongo export: aggregation joining `screens` → `companies` (lookup by `companyId`), filter to the 6 target markets, project to flat `{device_id, venue_id, dma, venue_name}`. User runs the export and supplies the file as `backend/data/venues.json` (committed).
+- [ ] DMA name canonicalization: confirm Mongo `market` codes (e.g. `"NY"` → `"New York"`); map to display labels at load time
+- [ ] `Campaign.target_dmas` JSON column (NOT NULL — selection mandatory)
+- [ ] `Campaign.start_date`, `Campaign.end_date` Date columns (UTC midnight resolution, day-only)
+- [ ] In-memory venues index loaded at app startup: `dma → device_id[]` and `device_id → dma`
+- [ ] `GET /api/markets` (Privy-JWT-authed) → `[{dma, display_count}, …]`
+- [ ] `/bid` filter additions: bid request must carry `dma` (or `device_id` we resolve via the index); FIFO query gains `:dma = ANY(target_dmas) AND start_date <= today() <= end_date`
+- [ ] Auto-play loop (`services/auto_play.py`) and `simulate_play` endpoint: pick a campaign first, then pick a random device whose DMA is in `target_dmas` so the demo always settles
+- [ ] Status transition: `/bid` (or a periodic check) flips `active` campaigns whose `end_date < today` to `expired`. `expired` exposes the existing refund button.
+- [ ] **Wizard Step 2 — Targeting**: 6 DMA cards (name + display count), click-to-toggle, live REACH = sum of selected, mandatory ≥1, hardcoded "Frequency per screen: 1 every 5 min" line below REACH
+- [ ] **Wizard Step 3 — Schedule**: native `<input type="date">` for start + end; validation `start ≥ today`, `end ≥ start`
+
+**Exit criteria:** advertiser selects 2 DMAs + a 3-day window, hits next, campaign creates with `target_dmas=[...]` + dates set; auto-play only fires for devices in those DMAs and only within the date window; a campaign whose `end_date` passed flips to `expired` on the next bid attempt and refund still works.
+
+### Session 15 — Campaign calculator + protocol fee (Feature 5)
+- [ ] **Wizard Step 4 — Calculator**: replaces budget+CPM free-text inputs with a derived summary (Screens, Frequency, Operating hours, Plays/day, Duration, Daily budget, Total campaign, Protocol fee 2.5%, **Total to escrow**)
+- [ ] CPM locked via `DEMO_CPM` env (default `0.5` USD → $0.0005/play = 500 base units of USDC)
+- [ ] Operating hours hardcoded constant (`12h` → 144 plays/screen/day at 5-min frequency)
+- [ ] `Campaign.cpm` and `Campaign.budget` columns retained, populated with derived values on creation (no recompute in `/bid`)
+- [ ] New `Campaign.protocol_fee_amount` column for accounting
+- [ ] Protocol fee collected upfront: x402 settle pulls full `total + fee` into the campaign wallet, then a Privy `signAndSendTransaction` immediately moves the 2.5% to `PROTOCOL_REVENUE_WALLET_ADDRESS` (its own Privy server wallet, bootstrapped alongside treasury). Fee tx surfaces as its own Solscan link in the campaign detail panel.
+- [ ] `FAUCET_AMOUNT_USDC` made tunable (default 10 dev, can crank to 30 for the recorded demo run)
+- [ ] **Wizard Step 5 — Review & Fund**: shows calculator summary again with "Confirm and pay" — that's where the existing x402 settle lives; on success advances to a "campaign live" terminal step
+
+**Exit criteria:** advertiser steps through the wizard, sees a non-zero `Protocol fee` line, hits Confirm, the x402 transfer pulls the full `total to escrow`, Solscan shows two txs from the campaign wallet (advertiser→campaign funding, then campaign→protocol-revenue fee).
+
+### Session 16 — GCP deployment prep
 - [ ] Cloud Run configs (backend)
 - [ ] Cloud SQL Postgres migration from SQLite
-- [ ] Secret Manager for Privy secret, JWT server secret
-- [ ] Cloud Storage + CDN for dashboard build
+- [ ] Secret Manager for Privy secret, JWT server secret, GCS credentials, Circle API key (when/if account upgrade lands)
+- [ ] Cloud Storage + CDN for dashboard build (separate bucket from creatives)
+- [ ] Workload Identity for the GCS creatives bucket so we drop the JSON service account key from prod
 
-### Session 13 — Deploy to GCP
+### Session 17 — Deploy to GCP
 - [ ] Deploy backend to Cloud Run
 - [ ] Deploy dashboard
 - [ ] CORS, custom domain if time permits
 - [ ] Smoke test on live devnet
+- [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function
 
-### Session 14 — Demo rehearsal + submission
+### Session 18 — Demo rehearsal + submission
 - [ ] Judge demo script (2-3 min)
 - [ ] Record demo video
 - [ ] Submission README + Devpost writeup
@@ -371,4 +424,5 @@ Filed for BUSINESS-CONSTRAINTS §7 (mainnet blockers) cross-reference.
 - **2026-04-22 (Session 9 close):** Campaign funding flow shipped end-to-end. `<CreateCampaignForm>` + PayAI's `x402-solana@^2.0.4` auto-handshake against our existing backend. Path getting there cost four trips through the facilitator; each fix documented in Session 9 block above: (1) destination USDC ATA must be pre-created server-side → `build_campaign_bootstrap_tx` bundles SOL seed + ATA create, must confirm before returning 402; (2) x402.org v1 facilitator entry is `solana-devnet`, not CAIP-2; (3) `x402.org/facilitator` 308-redirects to `www.`; (4) `extra.feePayer` must be facilitator's address (Config 2 is the only working path on this stack) — fetched from `/supported` + cached in `get_facilitator_fee_payer()`. Advertiser-SOL-seed branch removed (facilitator pays gas). `lib/walletTrack.ts` shared Zustand store drives `WalletPanel` polling after any money-moving mutation so the debit lands visibly within 2–4s. E2E script (`scripts/e2e_demo.py`) unchanged — still 13/13 on the path that bypasses `/api/campaigns`.
 - **2026-04-22 (Session 10):** Dashboard play + refund flows shipped. Refactored `/proof` to extract `execute_settlement()` as a shared helper; new `POST /api/campaigns/:id/simulate-play` endpoint (advertiser-authed) mints claims server-side and reuses the pipeline so the dashboard can drive the full loop without exposing the publisher API key. Frontend: campaigns now render as a list via new `<CampaignsPanel>` + expandable `<CampaignCard>` — status badges, spent/budget progress bar, per-status actions (simulate/pause/resume/refund), Solscan-linked settlements. `walletTrack.startPolling` is triggered on refund success alongside the existing fund flow. Verified in browser on devnet: create → simulate plays tick up spent + add settlement rows → pause → refund sends remaining USDC back, wallet balance ticks up within a few seconds.
 - **2026-04-22 (Session 11):** Integration polish. `lib/errors.humanizeError()` extracts FastAPI `{detail}` payloads from axios errors and our manual x402 throws; now used across every error display. `CreateCampaignForm` reads the cached wallet query and guards against insufficient-balance submits before reaching the Privy signing popup. Funding progress moved from two stages (with one dead) to three accurate ones via `customFetch` instrumentation on the x402 client. **Demo auto-play**: `app/services/auto_play.py` runs in the FastAPI lifespan when `AUTO_PLAY_ENABLED=true`, ticking every `AUTO_PLAY_INTERVAL_SECONDS` to pick a random active + funded campaign and run `execute_settlement` against `DEMO_PUBLISHER_WALLET`. New public `GET /api/auto-play-status` endpoint drives a pulsing "Auto-simulating…" badge on the dashboard + conditional `refetchInterval` on the campaigns list + expanded stats. Added to .env.example (default off) and to the "demo-only flags MUST NOT ship to prod" list under Resolved decisions.
+- **2026-04-24 (design + planning, no code):** Pre-deploy feature scope pinned. Five product features added to roadmap before GCP work: (1) creative image upload to public GCS bucket (`x402-adserver-creatives`), replacing free-text creative URL input; (2) campaign-create wizard refactor with DMA targeting cards (REACH = live sum of selected display counts), filtering bids on selected markets; (3) hardcoded "1 every 5 min" frequency line under REACH; (4) start/end date scheduling step with `expired` status auto-transition when `end_date < today`; (5) derived budget calculator replacing budget+CPM free-text inputs, locked CPM via `DEMO_CPM` env, 2.5% protocol fee charged upfront via separate Privy `PROTOCOL_REVENUE_WALLET`. Demo math constraint: total-to-escrow must fit Circle faucet rate (20 USDC / 2h per address), locking demo CPM at $0.50 and demo configs to 1–3 DMAs / 2–7 days (~$15–20 typical, ~$232 worst-case at 6 DMAs × 7 days). Treasury topup probe: `POST https://api.circle.com/v1/faucet/drips` returns HTTP 403 for sandbox keys (`{"code":3,"message":"Forbidden"}`), confirming the docs note about "upgrading to mainnet" is a real account-level gate. Decided fallback: 3 helper Privy server wallets, manual web-faucet claim per address, `scripts/sweep_helpers.py` consolidates to treasury. Sessions 12–15 inserted before existing GCP block; old 12/13/14 renumbered to 16/17/18. `BUSINESS-CONSTRAINTS.md` updated: Circle multi-wallet workaround in §3, demo-CPM lock + protocol fee model in §6, creative hosting + inventory transparency in §5, content moderation pre-mainnet blocker as §7.16.
 - **2026-04-22 (Session 7):** Integration + hardening. `scripts/e2e_demo.py` exercises the full loop against real devnet via in-process ASGI (13/13 steps pass); covers happy path, replay 409, expired 400, paused no-bid, budget-exhaust auto-complete, double-refund guard. Retry stub (`services/retry.py` + `scripts/retry_settlements.py`) drains failed `settlements` rows. Discovered and fixed: (a) `get_usdc_balance` crashed on solana-py's `InvalidParamsMessage` error responses, (b) fresh Privy campaign wallets ended up with 0 SOL (devnet airdrop unreliable) so /proof + refund couldn't pay fees — now SOL-seeded from treasury via `build_sol_transfer_tx`, (c) Privy's simulation RPC lags devnet by 10–60s for new ATAs — added exponential-backoff retry keyed on `transaction_broadcast_failure` inside `sign_and_send_solana`. Structured logging (`logger.exception`) added at every Privy/facilitator boundary.
