@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -74,6 +74,16 @@ def _to_summary(c: Campaign) -> CampaignSummary:
 
 
 def _to_settlement_summary(s: Settlement) -> SettlementSummary:
+    # SQLite drops tzinfo on read even when the column is DateTime(timezone=True),
+    # so the value comes back naive. We always write UTC (_utcnow), so attach
+    # UTC before isoformat — otherwise the browser parses the wire string as
+    # local time and rows look "3h ago" the moment they're created.
+    created = s.created_at
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    dma = (
+        get_venues_index().label_for_device(s.device_id) if s.device_id else None
+    )
     return SettlementSummary(
         id=s.id,
         nonce=s.nonce,
@@ -82,7 +92,8 @@ def _to_settlement_summary(s: Settlement) -> SettlementSummary:
         tx_hash=s.tx_hash,
         solscan_url=_solscan_tx_url(s.tx_hash),
         status=s.status,
-        created_at=s.created_at.isoformat() if s.created_at else "",
+        created_at=created.isoformat() if created else "",
+        dma=dma,
     )
 
 
@@ -420,6 +431,18 @@ def campaign_stats(
         .limit(RECENT_SETTLEMENTS_LIMIT)
         .all()
     )
+    cutoff_24h = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        hours=24
+    )
+    last_24h_plays = (
+        db.query(Settlement)
+        .filter(
+            Settlement.campaign_id == c.id,
+            Settlement.status == SettlementStatus.CONFIRMED.value,
+            Settlement.created_at >= cutoff_24h,
+        )
+        .count()
+    )
 
     return CampaignStats(
         campaign_id=c.id,
@@ -428,6 +451,7 @@ def campaign_stats(
         spent=float(c.spent),
         remaining_budget=float(c.budget) - float(c.spent),
         total_plays=len(confirmed),
+        last_24h_plays=last_24h_plays,
         total_confirmed_usdc=sum(float(s.amount_usdc) for s in confirmed),
         cpm_price=float(c.cpm_price),
         target_dmas=c.target_dmas,
@@ -621,6 +645,7 @@ async def simulate_play(
         nonce=f"simulate-{uuid4().hex}",
         created_at=int(time.time()),
         amount_usdc=amount,
+        device_id=device["device_id"],
     )
 
     tx_hash = await execute_settlement(claims, db, privy)

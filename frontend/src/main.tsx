@@ -6,6 +6,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import App from "./App";
 import { queryClient } from "./lib/queryClient";
+import "./styles/tokens.css";
 import "./styles.css";
 
 const privyAppId = import.meta.env.VITE_PRIVY_APP_ID;

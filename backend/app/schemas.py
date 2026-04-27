@@ -80,6 +80,11 @@ class SettlementSummary(BaseModel):
     solscan_url: str | None
     status: str
     created_at: str
+    # DMA the bid was issued for (resolved server-side from device_id via the
+    # venues index). None for legacy rows that predate the device_id column,
+    # or rows whose device is no longer in the inventory file. Venue name
+    # stays internal (publisher-private — see Session 14 findings).
+    dma: str | None = None
 
 
 class CampaignStats(BaseModel):
@@ -89,6 +94,7 @@ class CampaignStats(BaseModel):
     spent: float
     remaining_budget: float
     total_plays: int
+    last_24h_plays: int = 0
     total_confirmed_usdc: float
     cpm_price: float
     target_dmas: list[str] | None = None
@@ -104,6 +110,32 @@ class RefundResponse(BaseModel):
     refund_amount: float
     tx_hash: str | None
     solscan_url: str | None
+
+
+class DashboardActivityRow(BaseModel):
+    """A settlement row joined with its campaign name, for the Overview feed."""
+
+    id: str
+    nonce: str
+    campaign_id: str
+    campaign_name: str
+    publisher_wallet: str
+    amount_usdc: float
+    tx_hash: str | None
+    solscan_url: str | None
+    status: str
+    created_at: str
+    dma: str | None = None
+
+
+class DashboardSummary(BaseModel):
+    """Aggregate counts across the advertiser's campaigns. The campaigns list
+    itself stays on /api/campaigns — this endpoint only returns what can't be
+    derived from that list (server-counted plays + cross-campaign feed)."""
+
+    total_plays: int
+    last_24h_plays: int
+    recent_activity: list[DashboardActivityRow]
 
 
 class SimulatePlayResponse(BaseModel):

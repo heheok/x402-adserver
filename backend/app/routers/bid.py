@@ -76,6 +76,7 @@ def _build_proof_context(
     campaign: Campaign,
     bid_id: str,
     publisher_wallet: str,
+    device_id: str,
     settings: Settings,
 ) -> str:
     claims = ProofContextClaims(
@@ -85,6 +86,7 @@ def _build_proof_context(
         nonce=secrets.token_urlsafe(16),
         created_at=int(time.time()),
         amount_usdc=_cost_per_play(float(campaign.cpm_price)),
+        device_id=device_id,
     )
     return encode_proof_context(
         claims, secret=settings.jwt_server_secret, algorithm=settings.jwt_algorithm
@@ -125,7 +127,9 @@ def bid(
         return BidResponse(id=body.id, seatbid=[], cur="USD")
 
     bid_id = f"bid-{uuid4().hex[:12]}"
-    proof_context = _build_proof_context(campaign, bid_id, publisher_wallet, settings)
+    proof_context = _build_proof_context(
+        campaign, bid_id, publisher_wallet, device_id, settings
+    )
 
     video = imp.get("video") or {}
     width = int(video.get("w", 1920))

@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>x402 · Advertiser dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="tokens.css" />
+<style>
+  html, body { background: #f0eee9; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="x-data.jsx"></script>
+<script type="text/babel" src="x-primitives.jsx"></script>
+<script type="text/babel" src="x-overview.jsx"></script>
+<script type="text/babel" src="x-campaigns.jsx"></script>
+<script type="text/babel" src="x-wizard.jsx"></script>
+
+<script type="text/babel">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "theme": "dark",
+  "type": "mono"
+}/*EDITMODE-END*/;
+
+// Frame wrapper — gives every artboard a consistent app shell with the
+// theme + type tokens applied via data-attributes so the Tweaks panel can
+// flip them globally.
+function AppFrame({ children, theme = 'dark', type = 'geometric', height = 900 }) {
+  return (
+    <div data-theme={theme} data-type={type} className="x-app x-tint-bg"
+      style={{ width: 1280, height, position: 'relative', overflow: 'hidden' }}>
+      {children}
+    </div>
+  );
+}
+
+function ScreenFrame({ tab = 'overview', walletState = 'normal', children, theme, type, height = 900 }) {
+  return (
+    <AppFrame theme={theme} type={type} height={height}>
+      <AppHeader tab={tab} walletState={walletState} />
+      <TabRow tab={tab} />
+      {children}
+    </AppFrame>
+  );
+}
+
+// ─── Tokens / system card ─────────────────────────────────────────────────
+function TokensCard({ theme, type }) {
+  const swatches = [
+    ['Solana purple','#9945FF'],['Solana teal','#14F195'],['Solana blue','#00C2FF'],
+    ['x402 blue','#3D5AFE'],['Active','#14F195'],['Paused','#FFB547'],
+    ['Expired','#FF7A45'],['Refunded','#6B8AFE'],['Completed','#7A8AA8'],['Draft','#8A8FA0'],
+  ];
+  return (
+    <AppFrame theme={theme} type={type} height={900}>
+      <div style={{ padding: 36, display: 'flex', flexDirection: 'column', gap: 28, height: '100%' }}>
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--tx-2)', fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>x402 · design system</div>
+          <div className="x-display" style={{ fontSize: 44, marginTop: 8, letterSpacing: '-0.03em', lineHeight: 1.0 }}>
+            DOOH meets <span className="x-grad-text">DeFi</span>.
+          </div>
+          <div style={{ fontSize: 14, color: 'var(--tx-1)', marginTop: 10, maxWidth: 640, lineHeight: 1.55 }}>
+            Solana-native palette + Coinbase x402 discipline. Geometric sans for UI, mono for on-chain data, editorial serif for accents. Live tokens below.
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, flex: 1 }}>
+          <div className="x-card" style={{ padding: 18 }}>
+            <Lbl>Color</Lbl>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 10, marginTop: 14 }}>
+              {swatches.map(([name, hex]) => (
+                <div key={hex}>
+                  <div style={{ height: 56, borderRadius: 8, background: hex, boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.06)' }} />
+                  <div style={{ fontSize: 10, marginTop: 6, color: 'var(--tx-1)' }}>{name}</div>
+                  <div style={{ fontSize: 10, color: 'var(--tx-3)', fontFamily: 'var(--font-mono)' }}>{hex}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: 'var(--tint-grad-strong)', color: '#08070A', fontWeight: 600 }}>
+              Brand gradient · 9945FF → 14F195
+            </div>
+          </div>
+
+          <div className="x-card" style={{ padding: 18 }}>
+            <Lbl>Type</Lbl>
+            <div style={{ marginTop: 12 }}>
+              <div className="x-display" style={{ fontSize: 36, letterSpacing: '-0.02em', lineHeight: 1 }}>Display · 36/40</div>
+              <div style={{ fontSize: 22, marginTop: 14, fontWeight: 500 }}>Heading · 22/28</div>
+              <div style={{ fontSize: 13, marginTop: 10, color: 'var(--tx-1)', lineHeight: 1.55 }}>Body · 13/20. Real-time campaign performance across the x402 network.</div>
+              <div className="x-mono" style={{ fontSize: 12, marginTop: 14, color: 'var(--tx-1)' }}>Mono · 4WMxk7…2pQ9 · 1,240.50 USDC</div>
+              <div style={{ fontFamily: 'var(--font-editorial)', fontSize: 22, marginTop: 12, fontStyle: 'italic', color: 'var(--tx-1)' }}>Editorial · "settle every play, on-chain"</div>
+            </div>
+          </div>
+
+          <div className="x-card" style={{ padding: 18 }}>
+            <Lbl>Status badges</Lbl>
+            <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+              {['draft','active','paused','completed','expired','refunded'].map(s => <StatusBadge key={s} status={s} />)}
+            </div>
+          </div>
+
+          <div className="x-card" style={{ padding: 18 }}>
+            <Lbl>Buttons</Lbl>
+            <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button className="x-btn x-btn-primary"><Icon name="plus" size={12} stroke={2}/> Primary</button>
+              <button className="x-btn">Secondary</button>
+              <button className="x-btn x-btn-grad">Brand grad</button>
+              <button className="x-btn x-btn-sm">Small</button>
+              <button className="x-btn x-btn-ghost" style={{ background: 'transparent', borderColor: 'transparent' }}>Ghost</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </AppFrame>
+  );
+}
+
+// ─── Wallet chip sheet ────────────────────────────────────────────────────
+function WalletSheet({ theme, type }) {
+  const Row = ({ label, children, extra }) => (
+    <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 24, alignItems: 'flex-start', padding: '18px 0', borderTop: '1px solid var(--line-1)' }}>
+      <div>
+        <div style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+        {extra && <div style={{ fontSize: 11, color: 'var(--tx-2)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>{extra}</div>}
+      </div>
+      <div>{children}</div>
+    </div>
+  );
+  return (
+    <AppFrame theme={theme} type={type} height={1100}>
+      <div style={{ padding: 36, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--tx-2)', fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Wallet chip · all states</div>
+          <div className="x-display" style={{ fontSize: 28, marginTop: 6, letterSpacing: '-0.025em' }}>Header right · Privy embedded wallet</div>
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <Row label="Collapsed · normal" extra="balance ≥ 1 USDC">
+            <WalletChip state="normal" balance={1240.50} />
+          </Row>
+          <Row label="Collapsed · low balance" extra="< 1 USDC · pulses, accent border">
+            <WalletChip state="low" balance={0.34} />
+          </Row>
+          <Row label="Collapsed · pending faucet" extra="while inbound tx confirms">
+            <WalletChip state="pending" />
+          </Row>
+          <Row label="No Solana wallet" extra="Privy account exists, no Solana linked">
+            <WalletChip state="no-wallet" />
+          </Row>
+          <Row label="Expanded · dropdown" extra="primary CTA: + Get test USDC">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+              <WalletChip state="normal" balance={1240.50} expanded />
+              <WalletDropdown anchor="inline" state="normal" balance={1240.50} address="Hk7c8sP9aN3fM2vR5tQpL4qWzX1bD8eY9F2" />
+            </div>
+          </Row>
+          <Row label="Expanded · low balance" extra="hint surfaces, faucet emphasized">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+              <WalletChip state="low" balance={0.34} expanded />
+              <WalletDropdown anchor="inline" state="low" balance={0.34} address="Hk7c8sP9aN3fM2vR5tQpL4qWzX1bD8eY9F2" />
+            </div>
+          </Row>
+          <Row label="Expanded · pending" extra="inbound +100 USDC, confirming…">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+              <WalletChip state="pending" expanded />
+              <WalletDropdown anchor="inline" state="pending" balance={1340.50} address="Hk7c8sP9aN3fM2vR5tQpL4qWzX1bD8eY9F2" />
+            </div>
+          </Row>
+        </div>
+      </div>
+    </AppFrame>
+  );
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const theme = t.theme, type = t.type;
+
+  return (
+    <>
+      <DesignCanvas>
+        <DCSection id="system" title="x402 · system" subtitle="Tokens, wallet chip states, status badges">
+          <DCArtboard id="tokens" label="Design tokens" width={1280} height={900}>
+            <TokensCard theme={theme} type={type} />
+          </DCArtboard>
+          <DCArtboard id="wallet" label="Wallet chip · sheet" width={1280} height={1100}>
+            <WalletSheet theme={theme} type={type} />
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="firstrun" title="First run" subtitle="Empty → wizard → funded">
+          <DCArtboard id="ov-empty" label="Overview · empty (no campaigns)" width={1280} height={900}>
+            <ScreenFrame tab="overview" theme={theme} type={type}>
+              <OverviewEmpty />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="w1" label="Wizard · 1 Creative" width={1280} height={900}>
+            <ScreenFrame tab="overview" theme={theme} type={type}>
+              <OverviewEmpty />
+              <WizStep1 />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="w2" label="Wizard · 2 Targeting" width={1280} height={900}>
+            <ScreenFrame tab="overview" theme={theme} type={type}>
+              <OverviewEmpty />
+              <WizStep2 />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="w3" label="Wizard · 3 Schedule" width={1280} height={900}>
+            <ScreenFrame tab="overview" theme={theme} type={type}>
+              <OverviewEmpty />
+              <WizStep3 />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="w4" label="Wizard · 4 Budget" width={1280} height={900}>
+            <ScreenFrame tab="overview" theme={theme} type={type}>
+              <OverviewEmpty />
+              <WizStep4 />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="w4i" label="Wizard · 4 Budget (insufficient)" width={1280} height={900}>
+            <ScreenFrame tab="overview" walletState="low" theme={theme} type={type}>
+              <OverviewEmpty />
+              <WizStep4 insufficient />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="w5" label="Wizard · 5 Review" width={1280} height={1000}>
+            <ScreenFrame tab="overview" theme={theme} type={type} height={1000}>
+              <OverviewEmpty />
+              <WizStep5 />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="fund" label="Funding · in progress" width={1280} height={900}>
+            <ScreenFrame tab="overview" theme={theme} type={type}>
+              <OverviewEmpty />
+              <WizFunding stage={2} />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="success" label="Funding · success" width={1280} height={900}>
+            <ScreenFrame tab="overview" theme={theme} type={type}>
+              <OverviewEmpty />
+              <WizSuccess />
+            </ScreenFrame>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="steady" title="Steady state" subtitle="Live dashboard with funded campaigns">
+          <DCArtboard id="ov" label="Overview · normal" width={1280} height={1100}>
+            <ScreenFrame tab="overview" theme={theme} type={type} height={1100}>
+              <OverviewNormal />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="ov-load" label="Overview · loading" width={1280} height={1100}>
+            <ScreenFrame tab="overview" theme={theme} type={type} height={1100}>
+              <OverviewLoading />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="cl" label="Campaigns · list" width={1280} height={1100}>
+            <ScreenFrame tab="campaigns" theme={theme} type={type} height={1100}>
+              <CampaignsList />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="ce" label="Campaigns · expanded" width={1280} height={1500}>
+            <ScreenFrame tab="campaigns" theme={theme} type={type} height={1500}>
+              <CampaignExpanded />
+            </ScreenFrame>
+          </DCArtboard>
+          <DCArtboard id="cl-empty" label="Campaigns · empty" width={1280} height={900}>
+            <ScreenFrame tab="campaigns" theme={theme} type={type}>
+              <CampaignsEmpty />
+            </ScreenFrame>
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      <TweaksPanel title="Tweaks">
+        <TweakSection label="Theme">
+          <TweakRadio label="Mode" value={t.theme} options={['dark','light']} onChange={(v) => setTweak('theme', v)} />
+        </TweakSection>
+        <TweakSection label="Typography">
+          <TweakRadio label="Family" value={t.type}
+            options={[{ value:'geometric', label:'Geo' },{ value:'mono', label:'Mono' },{ value:'editorial', label:'Edit.' }]}
+            onChange={(v) => setTweak('type', v)} />
+        </TweakSection>
+      </TweaksPanel>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

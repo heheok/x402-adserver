@@ -166,6 +166,10 @@ during the e2e's bid → proof retry window, breaking the spent-equals-one-play
 assertion. The e2e's own lifespan force-disables auto-play via os.environ,
 but that only affects its own container.
 
+This is **especially disruptive now** with multi-play per tick — a single
+auto-play burst (10–20 plays/tick) can drain the e2e's tiny-budget tests
+within seconds and turns 13/13 into 9/11 typical. Always stop first.
+
 ```bash
 docker compose stop backend
 docker compose run --rm backend python scripts/e2e_demo.py
@@ -209,17 +213,19 @@ still failing — pipe that into cron/automation if you want.
 
 ## Auto-play (demo-only)
 
-Server-side background loop that auto-settles one play every
-`AUTO_PLAY_INTERVAL_SECONDS` on a random active + funded campaign. Only meant
-for the dashboard demo — production publishers drive `/bid` + `/proof`
-themselves. **Must be off in any deployed environment.**
+Server-side background loop that fires `random.randint(MIN, MAX)` plays
+**concurrently** every `AUTO_PLAY_INTERVAL_SECONDS` across active + funded
+campaigns. Only meant for the dashboard demo — production publishers drive
+`/bid` + `/proof` themselves. **Must be off in any deployed environment.**
 
 ### Enable / disable
 Edit `backend/.env`:
 ```
-AUTO_PLAY_ENABLED=true            # or false
-AUTO_PLAY_INTERVAL_SECONDS=15     # tick interval
-DEMO_PUBLISHER_WALLET=<address>   # who receives the settlements
+AUTO_PLAY_ENABLED=true              # or false
+AUTO_PLAY_INTERVAL_SECONDS=15       # tick interval
+AUTO_PLAY_PLAYS_PER_TICK_MIN=10     # plays per tick lower bound
+AUTO_PLAY_PLAYS_PER_TICK_MAX=20     # plays per tick upper bound
+DEMO_PUBLISHER_WALLET=<address>     # who receives the settlements
 ```
 Then **recreate** the container (restart won't pick up env changes — see the
 env_file gotcha above):
@@ -227,12 +233,22 @@ env_file gotcha above):
 docker compose up -d --force-recreate backend
 ```
 
+### Calibrating the rate
+Calculator math says `screens × 144 plays/screen/day`. To hit roughly that
+rate on the dashboard:
+```
+target_plays_per_sec ≈ (screens × 144) / 86400
+mean_plays_per_tick   = target_plays_per_sec × AUTO_PLAY_INTERVAL_SECONDS
+```
+For a 1-DMA SF demo (115 screens) → ~1 play/sec → ~15 plays/tick at 15 s
+interval. Setting `MIN=10`, `MAX=20` lands on that with natural variance.
+
 ### Verify it's running
 ```bash
-docker compose logs backend | grep auto-play | tail -10
+docker compose logs backend | grep auto-play | tail -25
 ```
-Expected: one `auto-play loop starting — interval=15s` line, then one
-`auto-play: campaign=... tx=...` line per tick.
+Expected: one `auto-play loop starting — interval=15s` line, then a burst of
+`auto-play: campaign=... tx=...` lines clustered per tick (one per play).
 
 ### Tail it live
 ```bash
@@ -247,14 +263,23 @@ curl http://localhost:8000/api/auto-play-status
 The dashboard polls this and shows a pulsing "Auto-simulating…" badge when enabled.
 
 ### Behaviour notes
-- Picks at **random** from campaigns with `status=active` AND
-  `remaining >= cpm_price/1000`. Oldest-funded doesn't win; multiple active
-  campaigns all tick along.
-- A campaign drained mid-tick (manual simulate, external `/proof`) will log
-  a harmless `auto-play skipped … status=409` on the next tick that picks it.
+- Picks at **random** (with replacement) from campaigns with `status=active`
+  AND `remaining >= cpm_price/1000`. A single tick can land multiple plays
+  on the same campaign; each pick re-randomizes the device.
+- Each play opens its own DB session (concurrent writes safe). The
+  SQLAlchemy connection pool is sized 30 + 60 overflow so 10–20 concurrent
+  Privy awaits don't exhaust it.
+- Each USDC transfer carries an SPL Memo program v2 instruction tagged with
+  the nonce, otherwise concurrent transfers with identical (from, to,
+  amount) within one blockhash window get deduped by the network to one
+  on-chain tx. The memo bytes make each tx unique. This is internal — no
+  publisher contract change.
+- A campaign drained mid-tick (manual simulate, external `/proof`) logs a
+  harmless `auto-play skipped … status=409` on the next tick that picks it.
 - Failed on-chain settlements land in the `settlements` table with
-  `status=failed` the same way manual ones do — clear with
-  `scripts/retry_settlements.py`.
+  `status=failed` the same way manual ones do, AND **the budget reservation
+  is automatically refunded** via a compensating UPDATE — failed plays no
+  longer burn budget. Clear failed rows with `scripts/retry_settlements.py`.
 
 ---
 
@@ -509,6 +534,8 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 | `DEMO_PUBLISHER_WALLET`       | Demo-only: receives plays from `/simulate-play`+auto-play | 10            |
 | `AUTO_PLAY_ENABLED`           | Demo-only: server background loop settles plays (off)    | 11             |
 | `AUTO_PLAY_INTERVAL_SECONDS`  | Auto-play tick interval (default 15)                     | 11             |
+| `AUTO_PLAY_PLAYS_PER_TICK_MIN`| Plays per tick lower bound (default 1)                   | 16             |
+| `AUTO_PLAY_PLAYS_PER_TICK_MAX`| Plays per tick upper bound (default 1)                   | 16             |
 | `GCS_BUCKET_NAME`             | Public-read GCS bucket for advertiser creatives          | 13             |
 | `GCS_CREDENTIALS_JSON`        | Container path to GCS service-account JSON               | 13             |
 | `DEMO_CPM`                    | Locked CPM in USD (default 0.5 = $0.0005/play)           | 15             |

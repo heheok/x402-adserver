@@ -33,15 +33,74 @@ from ..services.venues import get_venues_index
 logger = logging.getLogger(__name__)
 
 
-async def _tick(privy: PrivyClient) -> None:
-    """Run one iteration: pick a random eligible campaign + device and settle."""
-    # Local import to avoid a circular at module load time
-    # (routers/proof -> services/solana -> ... -> services/auto_play).
+# Snapshot of an eligible campaign captured under one DB session, safe to
+# read from concurrent tasks (each opens its own session for the actual
+# settlement write).
+_EligibleSnapshot = tuple[str, float, tuple[str, ...]]
+# fields: (campaign_id, cpm_price, target_dmas)
+
+
+async def _settle_one(
+    privy: PrivyClient,
+    campaign_id: str,
+    cpm_price: float,
+    device: dict[str, str],
+    demo_publisher: str,
+) -> None:
+    """Run one settlement on its own DB session. Failures are logged at info
+    level — typical between eligibility check and settle is a drained or
+    freshly-paused campaign, which we don't want spamming exception logs."""
+    # Local import to avoid a circular at module load time.
     from ..routers.proof import execute_settlement
 
+    db = SessionLocal()
+    try:
+        amount = cpm_price / 1000.0
+        claims = ProofContextClaims(
+            campaign_id=campaign_id,
+            bid_id=f"auto-{uuid4().hex[:8]}",
+            wallet_id=demo_publisher,
+            nonce=f"auto-{uuid4().hex}",
+            created_at=int(time.time()),
+            amount_usdc=amount,
+            device_id=device["device_id"],
+        )
+        try:
+            tx_hash = await execute_settlement(claims, db, privy)
+            logger.info(
+                "auto-play: campaign=%s amount=%s device=%s venue=%r dma=%s tx=%s",
+                campaign_id,
+                amount,
+                device["device_id"],
+                device["venue_name"],
+                device["dma"],
+                tx_hash[:16] + "…",
+            )
+        except HTTPException as e:
+            logger.info(
+                "auto-play skipped campaign=%s status=%d detail=%s",
+                campaign_id,
+                e.status_code,
+                e.detail,
+            )
+    finally:
+        db.close()
+
+
+async def _tick(privy: PrivyClient) -> None:
+    """Run one iteration: build the eligibility snapshot once, then fire a
+    random number of settlements concurrently — uniformly sampled from
+    [min, max]. Sampling is with replacement so multiple plays can land on
+    the same campaign in a single tick."""
     settings = get_settings()
     venues = get_venues_index()
     today = datetime.now(timezone.utc).date()
+    lo = max(1, int(settings.auto_play_plays_per_tick_min))
+    hi = max(lo, int(settings.auto_play_plays_per_tick_max))
+    plays_per_tick = random.randint(lo, hi)
+
+    # Build the snapshot under a short-lived session so we don't hold a
+    # connection through N parallel settlements.
     db = SessionLocal()
     try:
         actives = (
@@ -50,10 +109,9 @@ async def _tick(privy: PrivyClient) -> None:
             .all()
         )
         # Eligibility: funded for one play, schedule window contains today,
-        # has at least one device in the selected DMAs. Schedule + DMA
-        # filtering mirrors /bid so the demo only ever simulates plays the
-        # campaign's targeting would actually accept.
-        eligible: list[tuple[Campaign, dict[str, str]]] = []
+        # has at least one device in the selected DMAs. Mirrors /bid's
+        # filters so we only simulate plays the campaign would accept.
+        eligible: list[_EligibleSnapshot] = []
         for c in actives:
             if float(c.budget) - float(c.spent) + 1e-9 < float(c.cpm_price) / 1000.0:
                 continue
@@ -63,46 +121,43 @@ async def _tick(privy: PrivyClient) -> None:
                 continue  # /bid lazy-flips these; auto-play just skips
             if not c.target_dmas:
                 continue
-            device = venues.pick_random_device(list(c.target_dmas))
-            if device is None:
-                continue
-            eligible.append((c, device))
-        if not eligible:
-            return
-
-        campaign, device = random.choice(eligible)
-        amount = float(campaign.cpm_price) / 1000.0
-        claims = ProofContextClaims(
-            campaign_id=campaign.id,
-            bid_id=f"auto-{uuid4().hex[:8]}",
-            wallet_id=settings.demo_publisher_wallet,
-            nonce=f"auto-{uuid4().hex}",
-            created_at=int(time.time()),
-            amount_usdc=amount,
-        )
-
-        try:
-            tx_hash = await execute_settlement(claims, db, privy)
-            logger.info(
-                "auto-play: campaign=%s amount=%s device=%s venue=%r dma=%s tx=%s",
-                campaign.id,
-                amount,
-                device["device_id"],
-                device["venue_name"],
-                device["dma"],
-                tx_hash[:16] + "…",
-            )
-        except HTTPException as e:
-            # Typical on a drained or freshly-paused campaign between tick
-            # and settlement — log at info level, not an error.
-            logger.info(
-                "auto-play skipped campaign=%s status=%d detail=%s",
-                campaign.id,
-                e.status_code,
-                e.detail,
-            )
+            # Capture only primitives + the DMA list so we can use the
+            # snapshot from concurrent tasks after this session closes.
+            eligible.append((c.id, float(c.cpm_price), tuple(c.target_dmas)))
     finally:
         db.close()
+
+    if not eligible:
+        return
+
+    # Pick N campaign-device pairs. Pick a fresh device per pick (not per
+    # campaign) so multiple plays on the same campaign land on different
+    # screens — closer to the per-screen frequency the calculator implies.
+    tasks: list = []
+    for _ in range(plays_per_tick):
+        campaign_id, cpm, dmas = random.choice(eligible)
+        device = venues.pick_random_device(list(dmas))
+        if device is None:
+            continue
+        tasks.append(
+            _settle_one(
+                privy,
+                campaign_id,
+                cpm,
+                device,
+                settings.demo_publisher_wallet,
+            )
+        )
+
+    if not tasks:
+        return
+
+    # return_exceptions=True so a single failure doesn't drop sibling plays.
+    # Each task already swallows HTTPException; this catches anything else.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, Exception):
+            logger.exception("auto-play task crashed: %r", r)
 
 
 async def run_auto_play_loop(stop_event: asyncio.Event) -> None:

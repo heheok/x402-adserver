@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     # `app/services/auto_play.py`.
     auto_play_enabled: bool = False
     auto_play_interval_seconds: int = 15
+    # Plays fired per tick are sampled uniformly from [min, max] inclusive.
+    # Default is a fixed 1 (min == max) so a missing override keeps the
+    # original behavior. Calibrate against the calculator's implied
+    # per-second rate (screens × plays/day / 86400) so the dashboard ticks
+    # at roughly the rate a real campaign would consume.
+    auto_play_plays_per_tick_min: int = 1
+    auto_play_plays_per_tick_max: int = 1
 
     # Comma-separated list of allowed browser origins for CORS. The Vite dev
     # server at 5173 is the only caller today; production will add the real

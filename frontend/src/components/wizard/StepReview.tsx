@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePrivy } from "@privy-io/react-auth";
@@ -8,6 +9,9 @@ import { useApi } from "../../lib/api";
 import { humanizeError } from "../../lib/errors";
 import { solscanTxUrl, truncateAddress } from "../../lib/format";
 import { useWalletTrack } from "../../lib/walletTrack";
+import Icon from "../ui/Icon";
+import Solscan from "../ui/Solscan";
+import { Footer, Lbl } from "./Modal";
 import type { CreativeAsset } from "./StepImage";
 import type { Quote } from "./StepCalculator";
 import type { ScheduleWindow } from "./StepSchedule";
@@ -32,6 +36,8 @@ export type CreatedCampaign = CampaignSummary & { tx_hash?: string };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
+type FundStage = "preparing" | "signing" | "settling";
+
 type Props = {
   creative: CreativeAsset;
   targeting: TargetingSelection;
@@ -39,10 +45,13 @@ type Props = {
   quote: Quote;
   onBack: () => void;
   onCreated?: (campaign: CreatedCampaign) => void;
+  onClose: () => void;
+  onDone?: (campaign: CreatedCampaign) => void;
+  onFundingStateChange?: (busy: boolean) => void;
 };
 
 function fmtUsdc(n: number): string {
-  return n.toFixed(4);
+  return n.toFixed(2);
 }
 
 export default function StepReview({
@@ -52,6 +61,9 @@ export default function StepReview({
   quote,
   onBack,
   onCreated,
+  onClose,
+  onDone,
+  onFundingStateChange,
 }: Props) {
   const api = useApi();
   const qc = useQueryClient();
@@ -68,11 +80,25 @@ export default function StepReview({
     enabled: wallets.length > 0,
   });
 
-  const [name, setName] = useState("Demo campaign");
-  const [stage, setStage] = useState<
-    "idle" | "preparing" | "signing" | "settling"
-  >("idle");
+  const [name, setName] = useState("");
+  const [stage, setStage] = useState<FundStage | null>(null);
+  const [completedStages, setCompletedStages] = useState<Set<FundStage>>(
+    new Set(),
+  );
   const [result, setResult] = useState<CreatedCampaign | null>(null);
+
+  function setStageWithCompletion(next: FundStage) {
+    setStage((prev) => {
+      if (prev && prev !== next) {
+        setCompletedStages((s) => {
+          const n = new Set(s);
+          n.add(prev);
+          return n;
+        });
+      }
+      return next;
+    });
+  }
 
   const submit = useMutation<CreatedCampaign>({
     mutationFn: async () => {
@@ -83,16 +109,12 @@ export default function StepReview({
       let fetchIndex = 0;
       const instrumentedFetch: typeof fetch = async (input, init) => {
         const idx = fetchIndex++;
-        if (idx === 1) setStage("settling");
+        if (idx === 1) setStageWithCompletion("settling");
         const response = await fetch(input, init);
-        if (idx === 0) setStage("signing");
+        if (idx === 0) setStageWithCompletion("signing");
         return response;
       };
 
-      // 5% slack on top of the quoted escrow — covers tiny rounding/timing
-      // drift between the quote and the actual server-side compute on POST.
-      // The x402 client uses this as the max signed amount; the facilitator
-      // only ever charges what the server's PaymentRequirements specify.
       const client = createX402Client({
         wallet: wallets[0],
         network: "solana-devnet",
@@ -139,202 +161,655 @@ export default function StepReview({
     },
     onMutate: () => {
       setResult(null);
+      setCompletedStages(new Set());
       setStage("preparing");
+      onFundingStateChange?.(true);
     },
     onSuccess: (data) => {
-      setStage("idle");
+      setCompletedStages(new Set(["preparing", "signing", "settling"]));
+      setStage(null);
       setResult(data);
       qc.invalidateQueries({ queryKey: ["campaigns"] });
       qc.invalidateQueries({ queryKey: ["wallet"] });
       startPolling(20_000);
       onCreated?.(data);
+      onFundingStateChange?.(false);
     },
     onError: () => {
-      setStage("idle");
+      setStage(null);
+      onFundingStateChange?.(false);
     },
   });
 
-  const busy = submit.isPending;
   const balance = wallet.data?.usdc_balance ?? 0;
-  const insufficientBalance =
-    wallet.data !== undefined &&
-    quote.total_to_escrow_usdc > balance + 1e-9;
+  const insufficient =
+    wallet.data !== undefined && quote.total_to_escrow_usdc > balance + 1e-9;
   const canSubmit =
-    !busy &&
+    !submit.isPending &&
     wallets.length > 0 &&
     name.trim().length > 0 &&
-    !insufficientBalance;
+    !insufficient;
 
-  const stageLabel =
-    stage === "preparing"
-      ? "Creating campaign wallet on devnet (bootstrap + USDC ATA, ~5s)…"
-      : stage === "signing"
-        ? "Approve the USDC transfer in your wallet popup…"
-        : stage === "settling"
-          ? "Facilitator settling on devnet (~5–10s)…"
-          : null;
+  // Success view ------------------------------------------------------------
+  if (result) {
+    return (
+      <>
+        <div style={{ padding: "40px 22px 24px", textAlign: "center" }}>
+          <div
+            style={{
+              width: 64,
+              height: 64,
+              margin: "0 auto",
+              borderRadius: 32,
+              background: "rgba(20,241,149,0.12)",
+              border: "1px solid rgba(20,241,149,0.40)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxShadow: "0 12px 40px rgba(20,241,149,0.25)",
+              color: "var(--sol-teal)",
+            }}
+          >
+            <Icon name="check" size={26} stroke={2.4} />
+          </div>
+          <div
+            className="x-display"
+            style={{
+              fontSize: 22,
+              marginTop: 18,
+              letterSpacing: "-0.02em",
+            }}
+          >
+            <span className="x-grad-text">{result.name}</span> is live
+          </div>
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--tx-2)",
+              marginTop: 8,
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            {fmtUsdc(quote.total_to_escrow_usdc)} USDC escrowed · campaign
+            wallet {truncateAddress(result.wallet_address, 4)}
+          </div>
 
+          <div
+            style={{
+              marginTop: 22,
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 10,
+            }}
+          >
+            <SuccessTx
+              label="Funding tx"
+              tx={result.tx_hash ?? null}
+              url={result.tx_hash ? solscanTxUrl(result.tx_hash) : null}
+            />
+            <SuccessTx
+              label="Protocol fee tx"
+              tx={result.protocol_fee_tx_hash ?? null}
+              url={result.protocol_fee_solscan_url ?? null}
+            />
+          </div>
+        </div>
+        <Footer
+          left={
+            <span
+              style={{
+                fontSize: 11,
+                color: "var(--tx-2)",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              publishers will start bidding within ~30s
+            </span>
+          }
+          right={
+            <button
+              className="x-btn x-btn-primary"
+              onClick={() => (onDone ? onDone(result) : onClose())}
+            >
+              Done
+            </button>
+          }
+        />
+      </>
+    );
+  }
+
+  // Funding-in-progress view -----------------------------------------------
+  if (submit.isPending && stage) {
+    return <FundingProgress stage={stage} completed={completedStages} />;
+  }
+
+  // Review view (default) --------------------------------------------------
   return (
-    <div>
-      <h3>Review & fund</h3>
-      <p className="muted footnote">
-        Funds via the x402 handshake: signing transfers USDC from your wallet to
-        a fresh campaign wallet owned by the ad server.
-      </p>
+    <>
+      <div style={{ padding: 22 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <Lbl>Campaign name</Lbl>
+          <span
+            style={{
+              fontSize: 10,
+              color: name.trim()
+                ? "var(--sol-teal)"
+                : "var(--st-expired)",
+              fontFamily: "var(--font-mono)",
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+          >
+            {name.trim() ? "✓ ready" : "Required"}
+          </span>
+        </div>
+        <input
+          className="x-input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={{
+            marginTop: 6,
+            borderColor:
+              name.trim() || submit.isPending
+                ? undefined
+                : "rgba(255,122,69,0.45)",
+          }}
+          placeholder="e.g. Spring · launch"
+          disabled={submit.isPending}
+          autoFocus
+        />
 
+        <div
+          className="x-card"
+          style={{
+            marginTop: 16,
+            background: "var(--bg-2)",
+            overflow: "hidden",
+          }}
+        >
+          <ReviewRow
+            label="Creative"
+            value={
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  justifyContent: "flex-end",
+                }}
+              >
+                {creative.preview_data_url ? (
+                  <img
+                    src={creative.preview_data_url}
+                    alt=""
+                    style={{
+                      width: 36,
+                      height: 20,
+                      borderRadius: 4,
+                      objectFit: "cover",
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: 36,
+                      height: 20,
+                      borderRadius: 4,
+                      background: "var(--tint-grad-strong)",
+                    }}
+                  />
+                )}
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 12,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 220,
+                  }}
+                >
+                  {creative.filename}
+                </span>
+              </div>
+            }
+          />
+          <ReviewRow
+            label="Markets"
+            value={targeting.target_dmas.join(" · ")}
+            sub={`${quote.screens.toLocaleString()} screens`}
+          />
+          <ReviewRow
+            label="Schedule"
+            value={`${schedule.start_date} → ${schedule.end_date}`}
+            sub={`${quote.days} day${quote.days === 1 ? "" : "s"}`}
+          />
+          <ReviewRow
+            label="Plays projected"
+            value={quote.total_plays.toLocaleString()}
+            mono
+          />
+          <ReviewRow
+            label="CPM"
+            value={`${quote.cpm_price.toFixed(2)} USDC`}
+            mono
+          />
+          <ReviewRow
+            label={`Protocol fee · ${(quote.protocol_fee_pct * 100).toFixed(1)}%`}
+            value={`${fmtUsdc(quote.protocol_fee_usdc)} USDC`}
+            mono
+            muted
+          />
+          <ReviewRow
+            label="Total to escrow"
+            value={`${fmtUsdc(quote.total_to_escrow_usdc)} USDC`}
+            highlight
+          />
+        </div>
+
+        <div
+          style={{
+            marginTop: 12,
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
+            padding: 12,
+            borderRadius: 10,
+            background: "rgba(61,90,254,0.06)",
+            border: "1px solid rgba(61,90,254,0.20)",
+          }}
+        >
+          <Icon name="info" size={14} stroke={1.8} />
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--tx-1)",
+              lineHeight: 1.5,
+            }}
+          >
+            We'll spin up a{" "}
+            <span style={{ fontFamily: "var(--font-mono)" }}>
+              fresh per-campaign Privy server wallet
+            </span>
+            , transfer escrow via x402, and skim the 2.5% protocol fee in the
+            same flow.
+          </div>
+        </div>
+
+        {insufficient && (
+          <p
+            style={{
+              marginTop: 10,
+              fontSize: 12,
+              color: "var(--st-expired)",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            Total to escrow {fmtUsdc(quote.total_to_escrow_usdc)} USDC exceeds
+            your wallet balance of {fmtUsdc(balance)} USDC. Hit "Get test USDC"
+            first.
+          </p>
+        )}
+        {submit.isError && (
+          <p
+            style={{
+              marginTop: 10,
+              fontSize: 12,
+              color: "var(--st-expired)",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            {humanizeError(submit.error)}
+          </p>
+        )}
+      </div>
+      <Footer
+        left={
+          !name.trim() && !insufficient && !submit.isPending ? (
+            <span
+              style={{
+                fontSize: 11,
+                color: "var(--st-expired)",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              Add a campaign name to continue
+            </span>
+          ) : null
+        }
+        right={
+          <>
+            <button
+              className="x-btn"
+              onClick={onBack}
+              disabled={submit.isPending}
+            >
+              Back
+            </button>
+            <button
+              className="x-btn x-btn-grad x-btn-lg"
+              style={{ height: 40 }}
+              disabled={!canSubmit}
+              onClick={() => submit.mutate()}
+            >
+              <Icon name="check" size={12} stroke={2.4} /> Confirm &amp; Fund
+            </button>
+          </>
+        }
+      />
+    </>
+  );
+}
+
+function ReviewRow({
+  label,
+  value,
+  sub,
+  mono,
+  muted,
+  highlight,
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  sub?: ReactNode;
+  mono?: boolean;
+  muted?: boolean;
+  highlight?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "160px 1fr",
+        gap: 16,
+        padding: "12px 14px",
+        borderTop: "1px solid var(--line-1)",
+        background: highlight
+          ? "linear-gradient(135deg, rgba(153,69,255,0.08), rgba(20,241,149,0.04))"
+          : "transparent",
+      }}
+    >
+      <span
+        style={{
+          fontSize: 11,
+          color: "var(--tx-2)",
+          fontFamily: "var(--font-mono)",
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+        }}
+      >
+        {label}
+      </span>
+      <div style={{ textAlign: "right" }}>
+        <div
+          className={mono ? "x-mono x-tnum" : "x-tnum"}
+          style={{
+            fontSize: highlight ? 16 : 13,
+            fontWeight: highlight ? 600 : 500,
+            color: muted ? "var(--tx-2)" : "var(--tx-0)",
+          }}
+        >
+          {value}
+        </div>
+        {sub && (
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--tx-2)",
+              fontFamily: "var(--font-mono)",
+              marginTop: 2,
+            }}
+          >
+            {sub}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SuccessTx({
+  label,
+  tx,
+  url,
+}: {
+  label: string;
+  tx: string | null;
+  url: string | null;
+}) {
+  return (
+    <div
+      className="x-card"
+      style={{
+        padding: "12px 14px",
+        textAlign: "left",
+        background: "var(--bg-2)",
+      }}
+    >
+      <Lbl>{label}</Lbl>
       <div
         style={{
           display: "flex",
-          gap: "0.75rem",
-          alignItems: "flex-start",
-          margin: "0.75rem 0",
-          padding: "0.5rem",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          background: "rgba(255,255,255,0.02)",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginTop: 6,
         }}
       >
-        <img
-          src={creative.preview_data_url || creative.creative_url}
-          alt="creative"
-          style={{ width: 96, height: 54, objectFit: "cover", borderRadius: 4 }}
-        />
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <p className="muted footnote" style={{ margin: 0 }}>
-            Targeting · {targeting.target_dmas.join(", ")}
-          </p>
-          <p className="muted footnote" style={{ margin: 0 }}>
-            Schedule · {schedule.start_date} → {schedule.end_date}
-          </p>
-          <code
+        <span className="x-mono" style={{ fontSize: 12 }}>
+          {tx ? truncateAddress(tx, 4) : "—"}
+        </span>
+        {tx && url ? (
+          <Solscan href={url}>view</Solscan>
+        ) : (
+          <span
             style={{
-              display: "block",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              marginTop: "0.25rem",
+              fontSize: 11,
+              color: "var(--tx-3)",
+              fontFamily: "var(--font-mono)",
             }}
           >
-            {truncateAddress(creative.creative_id, 8)}
-          </code>
-        </div>
+            n/a
+          </span>
+        )}
       </div>
-
-      <div
-        style={{
-          marginTop: "0.75rem",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          background: "rgba(255,255,255,0.03)",
-          padding: "0.75rem",
-          display: "grid",
-          gridTemplateColumns: "auto 1fr",
-          rowGap: "0.35rem",
-          columnGap: "1rem",
-        }}
-      >
-        <span className="muted">Screens × days × plays</span>
-        <span>
-          {quote.screens.toLocaleString()} × {quote.days} × {quote.plays_per_screen_per_day} ={" "}
-          {quote.total_plays.toLocaleString()}
-        </span>
-        <span className="muted">Campaign total</span>
-        <span>{fmtUsdc(quote.total_usdc)} USDC</span>
-        <span className="muted">
-          Protocol fee ({(quote.protocol_fee_pct * 100).toFixed(1)}%)
-        </span>
-        <span>{fmtUsdc(quote.protocol_fee_usdc)} USDC</span>
-        <span style={{ fontWeight: 600 }}>Total to escrow</span>
-        <span style={{ fontWeight: 600 }}>
-          {fmtUsdc(quote.total_to_escrow_usdc)} USDC
-        </span>
-      </div>
-
-      <form
-        className="form"
-        style={{ marginTop: "1rem" }}
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit.mutate();
-        }}
-      >
-        <label>
-          <span>Campaign name</span>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            disabled={busy}
-            required
-          />
-        </label>
-
-        <div className="actions">
-          <button
-            type="button"
-            className="secondary"
-            onClick={onBack}
-            disabled={busy}
-          >
-            Back
-          </button>
-          <button type="submit" disabled={!canSubmit}>
-            {busy
-              ? "Funding…"
-              : `Confirm & fund (${fmtUsdc(quote.total_to_escrow_usdc)} USDC)`}
-          </button>
-          {stageLabel && (
-            <span className="pending">
-              <span className="pulse" aria-hidden>
-                ●
-              </span>{" "}
-              {stageLabel}
-            </span>
-          )}
-        </div>
-      </form>
-
-      {insufficientBalance && !submit.isError && (
-        <p className="error">
-          Total to escrow {fmtUsdc(quote.total_to_escrow_usdc)} USDC exceeds your
-          wallet balance of {balance.toFixed(4)} USDC. Hit "Get test USDC" first.
-        </p>
-      )}
-
-      {submit.isError && <p className="error">{humanizeError(submit.error)}</p>}
-
-      {result && (
-        <div className="success">
-          <p>
-            <strong>Campaign funded.</strong> id <code>{result.id}</code>,
-            wallet <code>{truncateAddress(result.wallet_address, 6)}</code>.
-          </p>
-          {result.tx_hash && (
-            <p className="footnote">
-              Funding tx:{" "}
-              <a
-                href={solscanTxUrl(result.tx_hash)}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {truncateAddress(result.tx_hash, 6)}
-              </a>
-            </p>
-          )}
-          {result.protocol_fee_tx_hash && result.protocol_fee_solscan_url && (
-            <p className="footnote">
-              Protocol fee tx:{" "}
-              <a
-                href={result.protocol_fee_solscan_url}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {truncateAddress(result.protocol_fee_tx_hash, 6)}
-              </a>
-            </p>
-          )}
-        </div>
-      )}
     </div>
+  );
+}
+
+function FundingProgress({
+  stage,
+  completed,
+}: {
+  stage: FundStage;
+  completed: Set<FundStage>;
+}) {
+  const steps: Array<{ id: FundStage; label: string; detail: string }> = [
+    {
+      id: "preparing",
+      label: "Creating campaign wallet",
+      detail: "Privy · server-side bootstrap + USDC ATA",
+    },
+    {
+      id: "signing",
+      label: "Signing x402 payment",
+      detail: "Using Privy embedded wallet",
+    },
+    {
+      id: "settling",
+      label: "Settling on Solana",
+      detail: "devnet RPC · facilitator co-sign",
+    },
+  ];
+
+  return (
+    <>
+      <div style={{ padding: "40px 22px 28px" }}>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <div style={{ position: "relative", width: 64, height: 64 }}>
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                borderRadius: 32,
+                background: "var(--tint-grad-strong)",
+                filter: "blur(20px)",
+                opacity: 0.6,
+              }}
+            />
+            <div
+              style={{
+                position: "relative",
+                width: 64,
+                height: 64,
+                borderRadius: 32,
+                background:
+                  "conic-gradient(from 0deg, var(--sol-purple), var(--sol-teal), var(--sol-purple))",
+                maskImage:
+                  "radial-gradient(circle, transparent 26px, #000 27px)",
+                WebkitMaskImage:
+                  "radial-gradient(circle, transparent 26px, #000 27px)",
+                animation: "fund-spin 1.4s linear infinite",
+              }}
+            />
+            <style>{`@keyframes fund-spin{ to{ transform: rotate(360deg) } }`}</style>
+          </div>
+          <div className="x-display" style={{ fontSize: 18, marginTop: 6 }}>
+            Funding campaign
+          </div>
+        </div>
+
+        <div
+          style={{
+            marginTop: 24,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          {steps.map((s) => {
+            const done = completed.has(s.id);
+            const cur = stage === s.id;
+            return (
+              <div
+                key={s.id}
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: 10,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  background: cur ? "var(--bg-2)" : "transparent",
+                  border: `1px solid ${cur ? "var(--line-2)" : "transparent"}`,
+                }}
+              >
+                <div
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: 11,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: done
+                      ? "var(--sol-teal)"
+                      : cur
+                        ? "transparent"
+                        : "var(--bg-3)",
+                    border: cur ? "2px solid var(--sol-purple)" : "none",
+                    color: "#08070A",
+                  }}
+                >
+                  {done ? (
+                    <Icon name="check" size={12} stroke={3} />
+                  ) : cur ? (
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: 3,
+                        background: "var(--sol-purple)",
+                      }}
+                    />
+                  ) : null}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 13,
+                      color: cur
+                        ? "var(--tx-0)"
+                        : done
+                          ? "var(--tx-1)"
+                          : "var(--tx-3)",
+                      fontWeight: cur ? 600 : 500,
+                    }}
+                  >
+                    {s.label}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--tx-2)",
+                      fontFamily: "var(--font-mono)",
+                      marginTop: 2,
+                    }}
+                  >
+                    {s.detail}
+                  </div>
+                </div>
+                {cur && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      color: "var(--sol-teal)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    pending…
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <Footer
+        left={
+          <span
+            style={{
+              fontSize: 11,
+              color: "var(--tx-2)",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            do not close this window
+          </span>
+        }
+        right={
+          <button
+            className="x-btn"
+            disabled
+            style={{ opacity: 0.5, pointerEvents: "none" }}
+          >
+            Cancel
+          </button>
+        }
+      />
+    </>
   );
 }

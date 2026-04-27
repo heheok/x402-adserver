@@ -79,6 +79,11 @@ class Settlement(Base):
     amount_usdc: Mapped[float] = mapped_column(Numeric(18, 6))
     tx_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default=SettlementStatus.CONFIRMED.value)
+    # device_id captures which screen the bid was issued for (from
+    # imp.ext.device_id at /bid time, threaded through the proof_context JWT).
+    # Nullable for backwards compatibility — pre-existing rows + JWTs minted
+    # before this field landed have no device_id.
+    device_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     campaign: Mapped[Campaign] = relationship(back_populates="settlements")

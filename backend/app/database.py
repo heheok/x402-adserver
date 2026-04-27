@@ -16,7 +16,22 @@ if settings.database_url.startswith("sqlite"):
 else:
     connect_args = {}
 
-engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
+# Bumped from the SQLAlchemy defaults (5 + 10) because auto-play fires
+# bursts of 10–20 concurrent settlements per tick, each holding a session
+# across a ~5–10s Privy await. The default pool exhausts within one tick
+# and subsequent plays time out at QueuePool. SQLite still serializes
+# write transactions at the file level, so a generous pool only buffers
+# the contention — it doesn't make writes faster, just prevents waiters
+# from timing out at 30s.
+engine = create_engine(
+    settings.database_url,
+    connect_args=connect_args,
+    future=True,
+    pool_size=30,
+    max_overflow=60,
+    pool_timeout=60,
+    pool_recycle=1800,
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
@@ -42,7 +57,7 @@ def init_db() -> None:
 # SQLite-only, dev-only column add. `create_all` won't touch existing tables,
 # so adding columns to `campaigns` after Session 13 would otherwise require
 # nuking the docker volume. Each ALTER is gated on PRAGMA so re-runs are no-ops.
-# Drop this when we move to Postgres + Alembic in Session 16.
+# Drop this when we move to Postgres + Alembic in Session 17.
 _DEV_ADD_COLUMNS = {
     "campaigns": [
         ("target_dmas", "TEXT"),
@@ -50,6 +65,9 @@ _DEV_ADD_COLUMNS = {
         ("end_date", "DATE"),
         ("protocol_fee_amount", "NUMERIC(18, 6)"),
         ("protocol_fee_tx_hash", "VARCHAR"),
+    ],
+    "settlements": [
+        ("device_id", "VARCHAR"),
     ],
 }
 

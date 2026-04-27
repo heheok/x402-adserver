@@ -1,0 +1,189 @@
+/* x402 design tokens
+   ────────────────────────────────────────────────────────────
+   Solana-flavored, x402-disciplined. Dark default. */
+
+:root {
+  /* Brand — Solana gradient stops */
+  --sol-purple: #9945FF;
+  --sol-teal:   #14F195;
+  --sol-blue:   #00C2FF;
+
+  /* x402 protocol cue (Coinbase-ish primary) */
+  --x402-blue:  #3D5AFE;
+  --x402-blue-hi: #5C75FF;
+
+  /* Status */
+  --st-active:    #14F195;
+  --st-paused:    #FFB547;
+  --st-draft:     #8A8FA0;
+  --st-completed: #7A8AA8;
+  --st-expired:   #FF7A45;
+  --st-refunded:  #6B8AFE;
+
+  /* Type */
+  --font-sans: "Geist", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+  --font-editorial: "Instrument Serif", "Times New Roman", serif;
+}
+
+/* Dark (default) */
+:root, [data-theme="dark"] {
+  --bg-0:   #07080C;     /* page */
+  --bg-1:   #0E1118;     /* surface */
+  --bg-2:   #151926;     /* surface raised */
+  --bg-3:   #1E2536;     /* hover / pressed */
+  --line-1: rgba(255,255,255,0.08);
+  --line-2: rgba(255,255,255,0.14);
+  --line-3: rgba(255,255,255,0.22);
+  --tx-0:   #F5F7FA;     /* primary */
+  --tx-1:   #B8C0D0;     /* secondary */
+  --tx-2:   #7A8294;     /* tertiary */
+  --tx-3:   #4E5566;     /* quaternary */
+  --shadow-card: 0 1px 0 rgba(255,255,255,0.04) inset, 0 12px 40px rgba(0,0,0,0.45);
+  --tint-grad: linear-gradient(135deg, rgba(153,69,255,0.18), rgba(20,241,149,0.10) 60%, transparent);
+  --tint-grad-strong: linear-gradient(135deg, #9945FF 0%, #14F195 100%);
+}
+
+/* Light */
+[data-theme="light"] {
+  --bg-0:   #F6F5F1;
+  --bg-1:   #FFFFFF;
+  --bg-2:   #FAF9F4;
+  --bg-3:   #EFEDE6;
+  --line-1: rgba(10,12,20,0.08);
+  --line-2: rgba(10,12,20,0.14);
+  --line-3: rgba(10,12,20,0.22);
+  --tx-0:   #0B0D14;
+  --tx-1:   #353A48;
+  --tx-2:   #5E6473;
+  --tx-3:   #8A8FA0;
+  --shadow-card: 0 1px 2px rgba(10,12,20,0.04), 0 12px 32px rgba(10,12,20,0.06);
+  --tint-grad: linear-gradient(135deg, rgba(153,69,255,0.10), rgba(20,241,149,0.06) 60%, transparent);
+  --tint-grad-strong: linear-gradient(135deg, #9945FF 0%, #14F195 100%);
+}
+
+/* Typography variants (TWEAK) */
+[data-type="geometric"] { --font-ui: var(--font-sans); }
+[data-type="mono"]      { --font-ui: var(--font-mono); }
+[data-type="editorial"] { --font-ui: var(--font-editorial); }
+[data-type="geometric"] { --display-family: var(--font-sans); --display-weight: 600; --display-tracking: -0.02em; }
+[data-type="mono"]      { --display-family: var(--font-mono); --display-weight: 500; --display-tracking: -0.01em; }
+[data-type="editorial"] { --display-family: var(--font-editorial); --display-weight: 400; --display-tracking: -0.01em; }
+
+/* Reset bits */
+* { box-sizing: border-box; }
+body { margin: 0; }
+button { font: inherit; color: inherit; }
+
+/* Helpers used across artboards */
+.x-mono { font-family: var(--font-mono); font-feature-settings: "tnum" 1, "zero" 1; }
+.x-tnum { font-variant-numeric: tabular-nums; }
+
+/* App shell typography defaults — applied inside artboards via .x-app */
+.x-app {
+  font-family: var(--font-ui, var(--font-sans));
+  color: var(--tx-0);
+  background: var(--bg-0);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01" 1, "cv11" 1;
+}
+.x-app, .x-app * { box-sizing: border-box; }
+
+/* Display / heading */
+.x-display {
+  font-family: var(--display-family, var(--font-sans));
+  font-weight: var(--display-weight, 600);
+  letter-spacing: var(--display-tracking, -0.02em);
+}
+
+/* Solana gradient text */
+.x-grad-text {
+  background: var(--tint-grad-strong);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Buttons */
+.x-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 36px; padding: 0 14px; border-radius: 10px;
+  border: 1px solid var(--line-2); background: var(--bg-2); color: var(--tx-0);
+  font-weight: 500; font-size: 13px; letter-spacing: -0.005em;
+  cursor: pointer; transition: background .12s, border-color .12s;
+}
+.x-btn:hover { background: var(--bg-3); }
+.x-btn-primary {
+  background: var(--x402-blue); color: white; border-color: transparent;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 6px 18px rgba(61,90,254,0.35);
+}
+.x-btn-primary:hover { background: var(--x402-blue-hi); }
+.x-btn-grad {
+  background: var(--tint-grad-strong); color: #08070A;
+  border-color: transparent; font-weight: 600;
+}
+.x-btn-ghost { background: transparent; }
+.x-btn-sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
+.x-btn-lg { height: 44px; padding: 0 18px; font-size: 14px; border-radius: 12px; }
+
+/* Card */
+.x-card {
+  background: var(--bg-1);
+  border: 1px solid var(--line-1);
+  border-radius: 14px;
+}
+
+/* Status badge */
+.x-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 500; letter-spacing: 0.02em;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+.x-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.x-badge-active    { color: var(--st-active);    background: rgba(20,241,149,0.10); border: 1px solid rgba(20,241,149,0.25); }
+.x-badge-active .dot { box-shadow: 0 0 10px var(--st-active); }
+.x-badge-paused    { color: var(--st-paused);    background: rgba(255,181,71,0.10);  border: 1px solid rgba(255,181,71,0.25); }
+.x-badge-draft     { color: var(--st-draft);     background: rgba(138,143,160,0.10); border: 1px solid rgba(138,143,160,0.22); }
+.x-badge-completed { color: var(--st-completed); background: rgba(122,138,168,0.10); border: 1px solid rgba(122,138,168,0.22); }
+.x-badge-expired   { color: var(--st-expired);   background: rgba(255,122,69,0.10);  border: 1px solid rgba(255,122,69,0.25); }
+.x-badge-refunded  { color: var(--st-refunded);  background: rgba(107,138,254,0.10); border: 1px solid rgba(107,138,254,0.25); }
+
+/* Inputs */
+.x-input {
+  width: 100%; height: 40px; padding: 0 12px;
+  background: var(--bg-2); border: 1px solid var(--line-1);
+  border-radius: 10px; color: var(--tx-0); font: inherit; outline: none;
+}
+.x-input:focus { border-color: var(--x402-blue); }
+
+/* Pulse for low-balance chip */
+@keyframes x-pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(255,181,71,0.45); }
+  50%     { box-shadow: 0 0 0 6px rgba(255,181,71,0.0); }
+}
+.x-pulse { animation: x-pulse 1.6s ease-in-out infinite; }
+
+/* Subtle backdrop tint applied on app frames */
+.x-tint-bg::before {
+  content: "";
+  position: absolute; inset: 0;
+  background: var(--tint-grad);
+  pointer-events: none;
+}
+
+/* Utility — soft separator line */
+.x-hr { height: 1px; background: var(--line-1); border: 0; }
+
+/* Glow ring */
+.x-ring-grad {
+  position: relative;
+}
+.x-ring-grad::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
+  background: var(--tint-grad-strong);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  pointer-events: none;
+}

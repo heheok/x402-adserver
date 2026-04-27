@@ -9,6 +9,7 @@ import base64
 import time
 
 from solana.rpc.async_api import AsyncClient
+from solders.instruction import Instruction
 from solders.message import MessageV0
 from solders.pubkey import Pubkey
 from solders.signature import Signature
@@ -26,6 +27,19 @@ from spl.token.instructions import (
 from ..config import get_settings
 
 USDC_DECIMALS = 6
+# SPL Memo Program v2 — used to attach a unique tag per settlement so two
+# concurrent USDC transfers with identical (from, to, amount) still produce
+# distinct tx bytes within one blockhash window. Without this, Solana's
+# network-level dedup collapses them to a single on-chain tx.
+MEMO_PROGRAM_ID = Pubkey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
+
+
+def _memo_ix(memo: str) -> Instruction:
+    return Instruction(
+        program_id=MEMO_PROGRAM_ID,
+        accounts=[],
+        data=memo.encode("utf-8"),
+    )
 
 
 async def get_usdc_balance(owner_address: str) -> float:
@@ -75,11 +89,17 @@ async def build_usdc_transfer_tx(
     from_address: str,
     to_address: str,
     amount_usdc: float,
+    memo: str | None = None,
 ) -> str:
     """Build a base64-encoded VersionedTransaction that transfers `amount_usdc` USDC.
 
     The `from_address` is the fee payer and token-account owner. Privy signs with it.
     Creates the destination's USDC ATA idempotently if missing.
+
+    Pass `memo` for callers that need byte-unique transactions per call (e.g.
+    concurrent settlements with identical from/to/amount). The memo program
+    is no-op on-chain but mutates the tx bytes, so Solana's dedup doesn't
+    collapse otherwise-identical transfers.
     """
     settings = get_settings()
     from_pk = Pubkey.from_string(from_address)
@@ -108,13 +128,17 @@ async def build_usdc_transfer_tx(
         )
     )
 
+    instructions: list[Instruction] = [ata_ix, transfer_ix]
+    if memo:
+        instructions.append(_memo_ix(memo))
+
     async with AsyncClient(settings.solana_rpc_url) as client:
         bh_resp = await client.get_latest_blockhash()
     blockhash = bh_resp.value.blockhash
 
     message = MessageV0.try_compile(
         payer=from_pk,
-        instructions=[ata_ix, transfer_ix],
+        instructions=instructions,
         address_lookup_table_accounts=[],
         recent_blockhash=blockhash,
     )

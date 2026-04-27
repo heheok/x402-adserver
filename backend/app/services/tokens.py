@@ -24,6 +24,11 @@ class ProofContextClaims:
     nonce: str
     created_at: int
     amount_usdc: float
+    # device_id is optional so JWTs minted before the field was added still
+    # decode cleanly (no migration needed for outstanding bids). /bid populates
+    # it from imp.ext.device_id; /proof persists it on the settlement so the
+    # dashboard can resolve DMA + venue per play.
+    device_id: str | None = None
 
 
 def encode_proof_context(claims: ProofContextClaims, secret: str, algorithm: str = "HS256") -> str:
@@ -39,6 +44,7 @@ def decode_proof_context(token: str, secret: str, algorithm: str = "HS256") -> P
     missing = required - data.keys()
     if missing:
         raise ProofContextError(f"proof_context missing fields: {missing}")
+    device_id = data.get("device_id")
     return ProofContextClaims(
         campaign_id=data["campaign_id"],
         bid_id=data["bid_id"],
@@ -46,4 +52,5 @@ def decode_proof_context(token: str, secret: str, algorithm: str = "HS256") -> P
         nonce=data["nonce"],
         created_at=int(data["created_at"]),
         amount_usdc=float(data["amount_usdc"]),
+        device_id=str(device_id) if device_id else None,
     )
