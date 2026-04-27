@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     treasury_wallet_address: str = ""
     faucet_amount_usdc: float = 100.0
 
+    # Comma-separated lists (matching order) of Privy server wallet ids /
+    # addresses used to multiplex Circle's 20-USDC-per-2h-per-address devnet
+    # faucet limit. Topped up via the manual web faucet, drained back to the
+    # treasury via `scripts/sweep_helpers.py`. See PLAN.md Session 12.
+    helper_wallet_ids: str = ""
+    helper_wallet_addresses: str = ""
+
     # Dev-only default publisher wallet for the "Simulate ad play" button on
     # the dashboard. The same address used in the E2E smoke (Session 5). In
     # production real publishers call /bid + /proof themselves with their own

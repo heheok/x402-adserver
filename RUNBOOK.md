@@ -76,11 +76,47 @@ both SOL (for tx fees) and USDC (for faucet payouts).
 
 Rate-limited? Fallbacks: https://solfaucet.com or https://faucet.quicknode.com/solana/devnet
 
-### Top up USDC
+### Top up USDC — single address (slow path)
 1. Open https://faucet.circle.com
 2. Network: **Solana Devnet**
 3. Paste `TREASURY_WALLET_ADDRESS`
-4. Request USDC (capped at 20 USDC per 2 hours)
+4. Request USDC (capped at 20 USDC per 2 hours per address)
+
+### Top up USDC — helper multiplex (recommended, ~2 min/day)
+
+Circle's 2h-per-address cap is per-address, not per-IP — verified 2026-04-27.
+We multiplex it via N helper wallets that get funded manually then swept back
+to the treasury. With N=3 helpers you can pull 60 USDC every 2h instead of 20.
+
+**One-time setup** (per Privy app):
+```bash
+docker compose run --rm backend python scripts/bootstrap_helpers.py
+# (or --count 5 for more throughput)
+```
+Paste the printed `HELPER_WALLET_IDS=...` and `HELPER_WALLET_ADDRESSES=...`
+lines into `backend/.env`, then:
+```bash
+docker compose up -d --force-recreate backend
+```
+
+**Daily routine** (~2 min):
+1. Open https://faucet.circle.com (Solana / Devnet) in a browser.
+2. For each address in `HELPER_WALLET_ADDRESSES`: paste, click claim, wait
+   for confirmation. (Optionally also claim into `TREASURY_WALLET_ADDRESS`
+   on the same pass — it counts as another address.)
+3. Sweep helpers → treasury:
+```bash
+docker compose run --rm backend python scripts/sweep_helpers.py
+```
+Expect one Solscan link per non-empty helper. Exit code 0 = all swept.
+
+### Rescue a one-off helper (not in env)
+If you funded a wallet manually (e.g. via `create_helper_wallet.py`) and
+need to sweep it once without adding it to `.env`:
+```bash
+docker compose run --rm backend python scripts/sweep_helpers.py \
+    --wallet-id <id> --wallet-address <address>
+```
 
 ### Verify
 ```bash
@@ -258,6 +294,8 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 | `TREASURY_WALLET_ID`          | Privy wallet id (after `bootstrap_treasury`)             | 2              |
 | `TREASURY_WALLET_ADDRESS`     | Solana address of the treasury wallet                    | 2              |
 | `FAUCET_AMOUNT_USDC`          | How much USDC the faucet hands out per call              | 2              |
+| `HELPER_WALLET_IDS`           | CSV of helper Privy wallet ids (sweep source)            | 12             |
+| `HELPER_WALLET_ADDRESSES`     | CSV of helper Solana addresses (matching order)          | 12             |
 | `PUBLISHER_API_KEY`           | Publisher API key for `/bid` and `/proof`                | 1              |
 | `JWT_SERVER_SECRET`           | Signs `proof_context` tokens                             | 1              |
 | `SOLANA_RPC_URL`              | Default: devnet                                          | 1              |
