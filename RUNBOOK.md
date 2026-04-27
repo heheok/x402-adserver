@@ -159,8 +159,17 @@ Runs the full loop against live devnet — seeds a fresh campaign, exercises the
 happy path and every edge case, reports pass/fail per step. Spends ~0.03 USDC
 per run from the treasury; costs ~0.001 SOL for fees.
 
+**Stop the long-running backend first if `AUTO_PLAY_ENABLED=true`** in
+`.env` (the demo default). Otherwise the live container's auto-play loop
+hits the same SQLite DB through the bind mount and adds phantom plays
+during the e2e's bid → proof retry window, breaking the spent-equals-one-play
+assertion. The e2e's own lifespan force-disables auto-play via os.environ,
+but that only affects its own container.
+
 ```bash
+docker compose stop backend
 docker compose run --rm backend python scripts/e2e_demo.py
+docker compose start backend
 ```
 
 What it covers:
@@ -249,6 +258,141 @@ The dashboard polls this and shows a pulsing "Auto-simulating…" badge when ena
 
 ---
 
+## Publisher inventory (DMA targeting)
+
+`/api/markets`, the wizard's targeting step, and the `/bid` DMA filter all
+read from `backend/data/venues.json` — a flattened export of the demo
+publisher's Mongo `screens` ⋈ `companies` collections. The file is
+**gitignored** (publisher-private inventory data); each dev environment
+re-provisions it via Mongo Compass. Loaded once at app startup.
+
+### Refresh / re-export
+
+Required when:
+- Setting up a new dev environment.
+- The publisher's Mongo inventory changes (new screens, new venues).
+
+Run the aggregation in Compass against the publisher's database:
+
+```json
+[
+  { "$lookup": {
+      "from": "companies",
+      "let": { "cid": "$companyId" },
+      "pipeline": [
+        { "$match": { "$expr": { "$eq": [ { "$toString": "$_id" }, "$$cid" ] } } }
+      ],
+      "as": "company"
+  }},
+  { "$unwind": "$company" },
+  { "$project": {
+      "_id": 0,
+      "device_id":  { "$toString": "$_id" },
+      "venue_id":   "$companyId",
+      "dma":        { "$toLower": "$company.market" },
+      "venue_name": "$company.companyName"
+  }}
+]
+```
+
+The `let`/`pipeline` form is mandatory: `screens.companyId` is a string but
+`companies._id` is an ObjectId, so a plain `localField`/`foreignField`
+lookup returns zero matches. Export the result as JSON to
+`backend/data/venues.json` (Compass tends to append a redundant `.json`
+extension — rename if needed).
+
+Restart the backend to reload:
+```bash
+docker compose restart backend
+```
+
+Expected log line:
+```
+venues loaded: N devices across 6 DMAs (skipped: M empty-dma, 0 unknown-dma)
+```
+
+If the file is missing, the loader logs a warning and `/bid` will reject
+every request as no-bid (no DMA can be resolved). `/api/markets` returns
+an empty list.
+
+### DMA codes
+
+The Mongo `market` field is short lowercase codes — `services/venues.DMA_LABELS`
+canonicalizes them to the display labels surfaced everywhere else:
+
+| Mongo code | Display label    |
+| ---------- | ---------------- |
+| `ny`       | New York         |
+| `la`       | Los Angeles      |
+| `sf`       | San Francisco    |
+| `mia`      | Miami            |
+| `bos`      | Boston           |
+| `aus`      | Austin           |
+
+Rows with empty or unknown `market` are skipped at load time with an info log.
+
+### Bid request shape (publisher contract)
+
+`/bid` requires `imp[0].ext.device_id` in addition to `imp[0].ext.wallet_id`
+— the device id resolves to a DMA via the venues index, then the FIFO
+matcher filters on `target_dmas` membership + schedule window. Missing or
+unknown `device_id` → empty seatbid (no-bid).
+
+---
+
+## Protocol revenue wallet (Session 15)
+
+The 2.5% protocol fee charged on every campaign creation is auto-transferred
+from the campaign wallet to a dedicated Privy server wallet right after
+x402 settle confirms. Lives separately from treasury so accounting stays
+clean (treasury = faucet source, protocol-revenue = fee sink).
+
+### One-time setup
+
+```bash
+docker compose run --rm backend python scripts/bootstrap_protocol_revenue.py
+```
+
+Paste the printed lines into `backend/.env`:
+```
+PROTOCOL_REVENUE_WALLET_ID=<id>
+PROTOCOL_REVENUE_WALLET_ADDRESS=<address>
+```
+Then recreate (env_file gotcha):
+```bash
+docker compose up -d --force-recreate backend
+```
+
+The script is idempotent — if `PROTOCOL_REVENUE_WALLET_ID` is already set,
+prints existing values and exits without creating anything new.
+
+The wallet does **not** need any SOL or USDC ATA pre-creation. Each fee
+transfer is paid for by the campaign wallet, and `build_usdc_transfer_tx`
+creates the destination ATA idempotently as part of the same tx.
+
+### Behaviour notes
+
+- Fee transfer is **best-effort**: a failure logs at exception level but the
+  campaign still flips ACTIVE. The fee then sits in the campaign wallet and
+  gets refunded to the advertiser if the campaign is refunded — the advertiser
+  is never short-changed; we just lose 2.5% revenue we would have collected.
+- Each campaign's fee is one Privy tx, persisted as `Campaign.protocol_fee_tx_hash`
+  + surfaced on the dashboard's campaign card with a Solscan link.
+- The fee amount comes from `services/calc.compute_quote()` — same function
+  the wizard's `/api/campaigns/quote` endpoint uses. Server-side single source
+  of truth.
+
+### Verify the wallet is collecting fees
+
+```bash
+docker compose run --rm backend python scripts/check_balance.py $PROTOCOL_REVENUE_WALLET_ADDRESS
+```
+
+Or on Solscan: `https://solscan.io/account/<address>?cluster=devnet` — each
+campaign creation should show one inbound USDC transfer.
+
+---
+
 ## Creative uploads (GCS)
 
 Advertiser creatives uploaded via the dashboard wizard land in a public-read
@@ -316,15 +460,19 @@ Creates one throwaway wallet and lists existing wallets. Exit code 0 = healthy.
 
 ## Database
 
-Currently SQLite at `backend/data/adserver.db` inside the `backend_data` volume.
+Currently SQLite at `backend/data/adserver.db`. Lives on the host via the
+`./backend/data:/app/data` bind mount declared in `docker-compose.yml` —
+named volume was retired in Session 14 so the user-supplied `venues.json`
+(see DMA targeting section) sits next to the DB. Both files are gitignored.
 
 ### Reset the DB (wipe campaigns, settlements, nonces)
 ```bash
-docker compose down
-docker volume rm x402_backend_data
-docker compose up -d backend
+docker compose stop backend
+rm backend/data/adserver.db
+docker compose start backend
 ```
-Tables are recreated automatically on startup via `init_db()`.
+Tables (and Session 14 + 15 columns) are recreated automatically on startup
+via `init_db()` + the dev-only `_dev_alter_table_for_existing_sqlite()` shim.
 
 ### Inspect the DB
 ```bash
@@ -360,6 +508,12 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 | `AUTO_PLAY_INTERVAL_SECONDS`  | Auto-play tick interval (default 15)                     | 11             |
 | `GCS_BUCKET_NAME`             | Public-read GCS bucket for advertiser creatives          | 13             |
 | `GCS_CREDENTIALS_JSON`        | Container path to GCS service-account JSON               | 13             |
+| `DEMO_CPM`                    | Locked CPM in USD (default 0.5 = $0.0005/play)           | 15             |
+| `OPERATING_HOURS_PER_DAY`     | Frequency constant; default 12                           | 15             |
+| `PLAYS_PER_HOUR_PER_SCREEN`   | Frequency constant; default 12 (one every 5 min)         | 15             |
+| `PROTOCOL_FEE_PCT`            | Default 0.025 (2.5%)                                     | 15             |
+| `PROTOCOL_REVENUE_WALLET_ID`  | Privy wallet id (after `bootstrap_protocol_revenue`)     | 15             |
+| `PROTOCOL_REVENUE_WALLET_ADDRESS` | Solana address of the protocol-fee sink wallet       | 15             |
 
 ---
 

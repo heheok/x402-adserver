@@ -18,6 +18,7 @@ import asyncio
 import logging
 import random
 import time
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -27,17 +28,20 @@ from ..database import SessionLocal
 from ..models import Campaign, CampaignStatus
 from ..services.privy import PrivyClient
 from ..services.tokens import ProofContextClaims
+from ..services.venues import get_venues_index
 
 logger = logging.getLogger(__name__)
 
 
 async def _tick(privy: PrivyClient) -> None:
-    """Run one iteration: pick a random active + funded campaign and settle."""
+    """Run one iteration: pick a random eligible campaign + device and settle."""
     # Local import to avoid a circular at module load time
     # (routers/proof -> services/solana -> ... -> services/auto_play).
     from ..routers.proof import execute_settlement
 
     settings = get_settings()
+    venues = get_venues_index()
+    today = datetime.now(timezone.utc).date()
     db = SessionLocal()
     try:
         actives = (
@@ -45,16 +49,28 @@ async def _tick(privy: PrivyClient) -> None:
             .filter(Campaign.status == CampaignStatus.ACTIVE.value)
             .all()
         )
-        funded = [
-            c
-            for c in actives
-            if float(c.budget) - float(c.spent) + 1e-9
-            >= float(c.cpm_price) / 1000.0
-        ]
-        if not funded:
+        # Eligibility: funded for one play, schedule window contains today,
+        # has at least one device in the selected DMAs. Schedule + DMA
+        # filtering mirrors /bid so the demo only ever simulates plays the
+        # campaign's targeting would actually accept.
+        eligible: list[tuple[Campaign, dict[str, str]]] = []
+        for c in actives:
+            if float(c.budget) - float(c.spent) + 1e-9 < float(c.cpm_price) / 1000.0:
+                continue
+            if c.start_date is not None and c.start_date > today:
+                continue
+            if c.end_date is not None and c.end_date < today:
+                continue  # /bid lazy-flips these; auto-play just skips
+            if not c.target_dmas:
+                continue
+            device = venues.pick_random_device(list(c.target_dmas))
+            if device is None:
+                continue
+            eligible.append((c, device))
+        if not eligible:
             return
 
-        campaign = random.choice(funded)
+        campaign, device = random.choice(eligible)
         amount = float(campaign.cpm_price) / 1000.0
         claims = ProofContextClaims(
             campaign_id=campaign.id,
@@ -68,9 +84,12 @@ async def _tick(privy: PrivyClient) -> None:
         try:
             tx_hash = await execute_settlement(claims, db, privy)
             logger.info(
-                "auto-play: campaign=%s amount=%s tx=%s",
+                "auto-play: campaign=%s amount=%s device=%s venue=%r dma=%s tx=%s",
                 campaign.id,
                 amount,
+                device["device_id"],
+                device["venue_name"],
+                device["dma"],
                 tx_hash[:16] + "…",
             )
         except HTTPException as e:

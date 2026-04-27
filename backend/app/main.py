@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .database import init_db
-from .routers import bid, campaigns, creatives, health, proof, wallet
+from .routers import bid, campaigns, creatives, health, markets, proof, wallet
 from .services.auto_play import run_auto_play_loop
 
 
@@ -59,6 +59,7 @@ def create_app() -> FastAPI:
     app.include_router(wallet.router)
     app.include_router(campaigns.router)
     app.include_router(creatives.router)
+    app.include_router(markets.router)
     app.include_router(bid.router)
     app.include_router(proof.router)
     return app

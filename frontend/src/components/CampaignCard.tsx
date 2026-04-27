@@ -14,6 +14,12 @@ export type CampaignSummary = {
   spent: number;
   remaining: number;
   wallet_address: string;
+  target_dmas?: string[] | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  protocol_fee_amount?: number | null;
+  protocol_fee_tx_hash?: string | null;
+  protocol_fee_solscan_url?: string | null;
 };
 
 type SettlementSummary = {
@@ -36,6 +42,9 @@ type CampaignStats = {
   total_plays: number;
   total_confirmed_usdc: number;
   cpm_price: number;
+  protocol_fee_amount?: number | null;
+  protocol_fee_tx_hash?: string | null;
+  protocol_fee_solscan_url?: string | null;
   recent_settlements: SettlementSummary[];
 };
 
@@ -44,6 +53,7 @@ type SimulatePlayResponse = {
   tx_hash: string;
   solscan_url: string;
   publisher_wallet: string;
+  dma?: string | null;
 };
 
 type RefundResponse = {
@@ -60,6 +70,7 @@ const STATUS_LABELS: Record<string, string> = {
   paused: "paused",
   completed: "completed",
   refunded: "refunded",
+  expired: "expired",
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -89,7 +100,7 @@ export default function CampaignCard({
     staleTime: 60_000,
   });
   const [actionError, setActionError] = useState<string | null>(null);
-  const [lastSimTx, setLastSimTx] = useState<string | null>(null);
+  const [lastSim, setLastSim] = useState<SimulatePlayResponse | null>(null);
   const [lastRefundTx, setLastRefundTx] = useState<string | null>(null);
 
   const stats = useQuery<CampaignStats>({
@@ -123,7 +134,7 @@ export default function CampaignCard({
     },
     onMutate: () => setActionError(null),
     onSuccess: (data) => {
-      setLastSimTx(data.tx_hash);
+      setLastSim(data);
       invalidateCampaign();
     },
     onError: (err: Error) => setActionError(humanizeError(err)),
@@ -173,7 +184,9 @@ export default function CampaignCard({
   const busy =
     simulate.isPending || pause.isPending || resume.isPending || refund.isPending;
   const canRefund =
-    campaign.status === "paused" || campaign.status === "completed";
+    campaign.status === "paused" ||
+    campaign.status === "completed" ||
+    campaign.status === "expired";
 
   return (
     <div className="campaign-card">
@@ -235,6 +248,40 @@ export default function CampaignCard({
                 </div>
               </>
             )}
+            {campaign.target_dmas && campaign.target_dmas.length > 0 && (
+              <div>
+                <span className="muted">Markets</span>
+                <span>{campaign.target_dmas.join(", ")}</span>
+              </div>
+            )}
+            {campaign.start_date && campaign.end_date && (
+              <div>
+                <span className="muted">Schedule</span>
+                <span>
+                  {campaign.start_date} → {campaign.end_date}
+                </span>
+              </div>
+            )}
+            {campaign.protocol_fee_amount != null && (
+              <div>
+                <span className="muted">Protocol fee</span>
+                <span>
+                  {campaign.protocol_fee_amount.toFixed(4)} USDC
+                  {campaign.protocol_fee_tx_hash && campaign.protocol_fee_solscan_url && (
+                    <>
+                      {" · "}
+                      <a
+                        href={campaign.protocol_fee_solscan_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        tx {truncateAddress(campaign.protocol_fee_tx_hash, 4)}
+                      </a>
+                    </>
+                  )}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="actions">
@@ -272,7 +319,8 @@ export default function CampaignCard({
                 </button>
               </>
             )}
-            {campaign.status === "completed" && (
+            {(campaign.status === "completed" ||
+              campaign.status === "expired") && (
               <button
                 onClick={() => refund.mutate()}
                 disabled={busy || !canRefund}
@@ -287,16 +335,17 @@ export default function CampaignCard({
           </div>
 
           {actionError && <p className="error">{actionError}</p>}
-          {lastSimTx && (
+          {lastSim && (
             <p className="footnote muted">
               Last play:{" "}
               <a
-                href={solscanTxUrl(lastSimTx)}
+                href={solscanTxUrl(lastSim.tx_hash)}
                 target="_blank"
                 rel="noreferrer"
               >
-                {truncateAddress(lastSimTx, 6)}
+                {truncateAddress(lastSim.tx_hash, 6)}
               </a>
+              {lastSim.dma && <> · in {lastSim.dma}</>}
             </p>
           )}
           {lastRefundTx && (

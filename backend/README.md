@@ -1,11 +1,15 @@
 # x402 Ad Server — Backend
 
-FastAPI + SQLite. Session 1 scaffold — all endpoints return 501 except `/health` and `/docs`.
+FastAPI + SQLite. Full demo loop: campaign create → x402 fund → bid →
+proof-of-play → settle → refund. See `../PLAN.md` for the session-by-session
+roadmap and `../RUNBOOK.md` for every ops procedure.
 
 ## Run locally with Docker
 
 ```bash
 cp backend/.env.example backend/.env
+# fill in PRIVY_APP_ID + PRIVY_APP_SECRET, run scripts/bootstrap_treasury.py
+# and scripts/bootstrap_protocol_revenue.py once each, paste outputs back
 docker compose up --build backend
 ```
 
@@ -30,32 +34,35 @@ uvicorn app.main:app --reload
 ```
 backend/
   app/
-    main.py              # FastAPI app + lifespan (init_db on startup)
+    main.py              # FastAPI app + lifespan (init_db + auto_play loop)
     config.py            # Settings via pydantic-settings
-    database.py          # SQLAlchemy engine + session + init_db()
+    database.py          # SQLAlchemy engine + init_db + dev SQLite ALTER shim
     models.py            # campaigns, settlements, used_nonces
     schemas.py           # pydantic request/response models
     dependencies.py      # X-API-Key (publisher) + Privy JWT (advertiser) guards
     routers/
-      health.py          # GET /health — implemented
-      wallet.py          # /api/wallet, /api/faucet — Session 2
-      campaigns.py       # /api/campaigns/* — Sessions 3 & 6
-      bid.py             # POST /bid — Session 4
-      proof.py           # POST /proof — Session 5
+      health.py          # GET /health, GET /api/auto-play-status
+      wallet.py          # /api/wallet, /api/faucet
+      campaigns.py       # /api/campaigns/* (incl. /quote, /simulate-play)
+      creatives.py       # POST /api/creatives (GCS upload)
+      markets.py         # GET /api/markets (DMA inventory)
+      bid.py             # POST /bid
+      proof.py           # POST /proof
     services/
-      privy.py           # Privy REST client — Session 2
-      x402.py            # facilitator client — Session 3
-      tokens.py          # proof_context JWT helpers — Sessions 4–5
+      privy.py           # Privy REST client (signAndSendTransaction)
+      x402.py            # facilitator client (verify, settle, fee_payer)
+      solana.py          # USDC transfer + SOL seed + ATA create helpers
+      tokens.py          # proof_context JWT helpers
+      venues.py          # publisher inventory index (DMA targeting)
+      calc.py            # campaign budget calculator (compute_quote)
+      gcs.py             # creative bucket upload
+      auto_play.py       # demo-only background settlement loop
+      retry.py           # failed-settlement retry helper
+  data/                  # gitignored — venues.json + adserver.db live here
+  scripts/               # bootstrap_*.py, sweep_helpers.py, e2e_demo.py, etc.
   requirements.txt
   Dockerfile
   .env.example
 ```
 
-## What works right now (Session 1)
-
-- `GET /health` — live.
-- `GET /docs` — every planned endpoint is visible with the right shapes.
-- SQLite DB created on startup at `./data/adserver.db` (inside container) with three tables.
-- Two auth guards wired but unverified — `X-API-Key` does a string match; Privy JWT currently accepts any non-empty bearer token (real JWKS verification lands in Session 2).
-
-See `../PLAN.md` for the full session roadmap and what's next.
+See `../PLAN.md` for the full session roadmap and `../RUNBOOK.md` for ops procedures.

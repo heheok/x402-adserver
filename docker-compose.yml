@@ -12,7 +12,10 @@ services:
       - ./backend/app:/app/app
       - ./backend/scripts:/app/scripts
       - ./backend/.secrets:/app/.secrets:ro
-      - backend_data:/app/data
+      # Bind-mount data dir so the user-supplied venues.json + dev SQLite DB
+      # both live on the host. Whole dir is gitignored — venues.json is
+      # publisher-private inventory, DB is local dev state.
+      - ./backend/data:/app/data
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     restart: unless-stopped
 
@@ -34,5 +37,3 @@ services:
       - backend
     restart: unless-stopped
 
-volumes:
-  backend_data:

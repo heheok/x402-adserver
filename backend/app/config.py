@@ -74,6 +74,25 @@ class Settings(BaseSettings):
     creative_required_width: int = 1920
     creative_required_height: int = 1080
 
+    # Demo CPM lock + frequency constants (Session 15). The advertiser does not
+    # set CPM — it's $0.50 USD = $0.0005/play. Operating hours + plays/hour
+    # combine to plays_per_screen_per_day = 144 (12h × 12 plays/h, one play
+    # every 5 minutes). Calculator output:
+    #   total = screens × plays_per_screen_per_day × days × cpm/1000
+    #   protocol_fee = total × protocol_fee_pct
+    #   total_to_escrow = total + protocol_fee
+    demo_cpm: float = 0.5
+    operating_hours_per_day: int = 12
+    plays_per_hour_per_screen: int = 12
+    protocol_fee_pct: float = 0.025
+
+    # Dedicated Privy server wallet for the 2.5% protocol fee — separate from
+    # treasury. Bootstrapped via scripts/bootstrap_protocol_revenue.py.
+    # Funded automatically via a Privy tx from each campaign wallet right
+    # after x402 settle confirms the budget+fee transfer.
+    protocol_revenue_wallet_id: str = ""
+    protocol_revenue_wallet_address: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

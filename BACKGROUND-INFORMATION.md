@@ -434,17 +434,37 @@ Get the authenticated advertiser's wallet info.
 Returns: wallet_address, usdc_balance (read from Solana RPC).
 Dashboard uses this to show the user's balance and enable/disable the "Fund Campaign" button.
 
+### POST /api/campaigns/quote (Session 15)
+
+Calculator endpoint. Wizard's Step 4 hits this; the same `compute_quote`
+runs server-side on POST `/api/campaigns` so the dashboard preview always
+matches what gets charged.
+
+- Body: `{target_dmas, start_date, end_date}`
+- Returns: `{screens, plays_per_screen_per_day, days, total_plays, cpm_price, total_usdc, protocol_fee_pct, protocol_fee_usdc, total_to_escrow_usdc}`
+
+Screen counts come from the server-side venues index, CPM from `DEMO_CPM`,
+fee from `PROTOCOL_FEE_PCT`. Clients don't supply these — single source of
+truth on the server.
+
 ### POST /api/campaigns (x402 payment flow)
 
 Create and fund a campaign. This is the x402 integration point.
 
-1. Advertiser sends campaign details: name, budget, creative_url, cpm_price, duration, targeting
-2. Ad server creates campaign record (status: "draft") + creates Privy server wallet
-3. Ad server returns **HTTP 402** with payment requirements: amount, USDC, network (Solana), campaign wallet address
-4. Advertiser's system pays via x402 — sends USDC to the campaign wallet, retries request with X-PAYMENT header
-5. Ad server verifies payment via facilitator or checks on-chain balance
-6. Campaign status → "active"
-7. Returns: campaign_id, campaign_wallet_address, status
+1. Advertiser sends `{name, creative_url, creative_id, target_dmas, start_date, end_date}` only — no budget, CPM, or duration in the body (server-derived from `DEMO_CPM` + the calculator + the venues index).
+2. Ad server runs `compute_quote` to derive `total_to_escrow = total + 2.5% fee`, creates campaign record (status: "draft") + creates Privy server wallet.
+3. Ad server returns **HTTP 402** with payment requirements (amount = `total_to_escrow_usdc`, USDC, Solana, campaign wallet address).
+4. Advertiser's system pays via x402 — sends USDC to the campaign wallet, retries request with X-PAYMENT header.
+5. Ad server verifies + settles via facilitator.
+6. Campaign wallet now holds `budget + fee`. Server fires a Privy USDC tx campaign-wallet → `PROTOCOL_REVENUE_WALLET_ADDRESS` for the fee (best-effort; failure leaves the fee in the campaign wallet but doesn't block activation).
+7. Campaign status → "active".
+8. Returns: campaign summary including `protocol_fee_amount` + `protocol_fee_tx_hash`.
+
+### GET /api/markets (Session 14)
+
+Per-DMA display counts derived from the venues index. Drives the wizard's
+targeting cards.
+Returns: `[{dma, display_count}, ...]` for the canonical DMA labels.
 
 ### GET /api/campaigns
 
@@ -509,16 +529,21 @@ Refund unspent budget to advertiser's embedded wallet.
 - advertiser_id (string — from Privy user ID)
 - advertiser_wallet (string — Solana address to refund unspent budget to)
 - name (string)
-- creative_url (string — CDN URL to the asset)
+- creative_url (string — public GCS URL set by `/api/creatives` upload, Session 13)
 - creative_id (string — stable crid for publisher caching)
-- cpm_price (decimal — USD)
-- budget (decimal — total USDC received via x402)
+- cpm_price (decimal — USD; server-set from `DEMO_CPM`, Session 15)
+- budget (decimal — playable amount = `total_usdc` from the calculator; excludes protocol fee)
 - spent (decimal — USDC paid out to publishers so far)
-- status (enum: draft, funded, active, paused, completed, refunded)
+- status (enum: draft, active, paused, completed, refunded, **expired** — Session 14)
 - wallet_id (string — Privy server wallet ID for this campaign)
 - wallet_address (string — Solana address of campaign wallet)
-- duration (integer — creative playback seconds)
-- refund_tx_hash (string, nullable — Solana tx hash of refund transaction)
+- duration (integer — creative playback seconds; default 15, no longer user-supplied as of Session 15)
+- refund_tx_hash (string, nullable)
+- target_dmas (JSON list of canonical DMA labels — Session 14, mandatory at create time)
+- start_date (date — UTC, inclusive — Session 14)
+- end_date (date — UTC, inclusive; campaigns auto-flip to `expired` when today > end_date — Session 14)
+- protocol_fee_amount (decimal, nullable — 2.5% of total, transferred to PROTOCOL_REVENUE_WALLET on activation — Session 15)
+- protocol_fee_tx_hash (string, nullable — Solscan-linked from the dashboard — Session 15)
 - created_at (timestamp)
 
 ### settlements
@@ -539,20 +564,25 @@ Refund unspent budget to advertiser's embedded wallet.
 ## Campaign Lifecycle
 
 1. **Draft** — advertiser called POST /api/campaigns, campaign record created, Privy wallet created, awaiting payment
-2. **Funded** — x402 payment received, USDC in campaign wallet, pending activation
-3. **Active** — campaign eligible for bid matching (auto-activates after funding, or manual activation)
-4. **Paused** — advertiser paused the campaign, not matched to bid requests, can resume or refund
-5. **Completed** — budget fully spent (budget - spent ≈ 0)
-6. **Refunded** — campaign ended with unspent budget, remainder sent back to advertiser wallet
+2. **Active** — x402 payment confirmed, protocol fee transferred, campaign eligible for bid matching
+3. **Paused** — advertiser paused the campaign, not matched to bid requests, can resume or refund
+4. **Completed** — budget fully spent (`budget - spent < cpm_price/1000`)
+5. **Refunded** — campaign ended with unspent budget, remainder sent back to advertiser wallet
+6. **Expired** (Session 14) — `end_date` passed before budget drained; lazy-flipped on the next `/bid` pass; refund button still applies
 
 ## Matching Logic (FIFO)
 
-When the publisher sends a bid request:
+When the publisher sends a bid request (must include `imp[0].ext.device_id`):
 
-1. Query active campaigns ordered by created_at ASC
-2. First campaign where `budget - spent > (cpm_price / 1000)` wins
-3. No real auction — first-price, first-come-first-serve
-4. If no active campaigns have budget, return no-bid (204)
+1. Resolve `device_id` to a DMA via the venues index. Unknown device → no-bid.
+2. Query active campaigns ordered by `created_at` ASC.
+3. While iterating, lazy-flip any campaign whose `end_date` is in the past to `EXPIRED`.
+4. Pick the first campaign where:
+   - DMA membership: `dma ∈ target_dmas`
+   - Schedule window: `start_date ≤ today ≤ end_date`
+   - Remaining budget: `budget - spent ≥ cpm_price / 1000`
+5. No real auction — first-price, first-come-first-serve.
+6. If no campaign matches, return empty seatbid (200 with `seatbid: []`).
 
 ## Key Decisions (summary — see Decision Log above for full rationale)
 

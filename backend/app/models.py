@@ -1,7 +1,7 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String
+from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -17,6 +17,9 @@ class CampaignStatus(str, Enum):
     PAUSED = "paused"
     COMPLETED = "completed"
     REFUNDED = "refunded"
+    # End_date passed before budget drained. /bid flips active→expired lazily;
+    # refund button still applies (campaign wallet may hold remaining funds).
+    EXPIRED = "expired"
 
 
 class SettlementStatus(str, Enum):
@@ -44,6 +47,22 @@ class Campaign(Base):
 
     duration: Mapped[int] = mapped_column(Integer, default=15)
     refund_tx_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Targeting (Session 14). target_dmas is a JSON list of canonical DMA labels
+    # ("New York", "San Francisco", …). Mandatory ≥1 at create time but the
+    # column is nullable so the dev SQLite ALTER doesn't reject existing rows.
+    target_dmas: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # Protocol fee (Session 15). 2.5% of budget, charged upfront alongside the
+    # x402 funding tx; transferred from the campaign wallet to a dedicated
+    # PROTOCOL_REVENUE_WALLET right after settle confirms. Non-refundable —
+    # refund only returns budget - spent.
+    protocol_fee_amount: Mapped[float | None] = mapped_column(
+        Numeric(18, 6), nullable=True
+    )
+    protocol_fee_tx_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

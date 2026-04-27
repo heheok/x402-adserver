@@ -6,7 +6,17 @@ same FastAPI app the container serves, which sidesteps Docker's service-name
 DNS load balancing (a `compose run` container shadows the live one for the
 `backend` service name).
 
+    docker compose stop backend
     docker compose run --rm backend python scripts/e2e_demo.py
+    docker compose start backend
+
+The `stop` is important: when AUTO_PLAY_ENABLED=true in .env (the demo
+default), the long-running backend container has its own auto-play loop
+that writes to the same SQLite DB via the bind mount. While the e2e runs,
+the long-running container's auto-play can pick up the test campaign and
+add a phantom play, breaking the spent-equals-one-play assertion. Stopping
+the long-running container makes the run deterministic; the e2e's own
+lifespan force-disables auto-play via os.environ further down.
 
 What it does:
 
@@ -46,6 +56,12 @@ from uuid import uuid4
 
 import httpx
 
+# Force-disable the demo auto-play loop for this run. Without this the lifespan
+# task picks up our test campaign during /bid + /proof's retry windows and
+# adds a phantom play, making spent=2*cost_per_play instead of 1*. Pydantic-
+# settings reads process env over .env, so this lands before get_settings().
+os.environ["AUTO_PLAY_ENABLED"] = "false"
+
 sys.path.insert(0, "/app")
 
 from solana.rpc.async_api import AsyncClient  # noqa: E402
@@ -58,6 +74,19 @@ from app.models import Campaign, CampaignStatus, Settlement, SettlementStatus  #
 from app.services.privy import PrivyClient, PrivyError  # noqa: E402
 from app.services.solana import build_sol_transfer_tx, build_usdc_transfer_tx, get_usdc_balance  # noqa: E402
 from app.services.tokens import ProofContextClaims, encode_proof_context  # noqa: E402
+from app.services.venues import DMA_LABELS, get_venues_index  # noqa: E402
+
+# Target DMA + a representative device id for /bid. The venues index is the
+# single source of truth — we pick the first device in the chosen DMA so the
+# script doesn't hard-code one that might be removed from a future export.
+E2E_TARGET_DMA_LABEL = DMA_LABELS["sf"]
+_index = get_venues_index()
+_sf_devices = _index.dma_to_devices.get("sf", [])
+if not _sf_devices:
+    raise RuntimeError(
+        "venues.json missing SF devices — refresh backend/data/venues.json"
+    )
+E2E_DEVICE_ID = _sf_devices[0]
 
 # ASGI in-process transport — base URL is cosmetic; httpx rewrites it onto the app
 BACKEND_URL = "http://testserver"
@@ -227,6 +256,9 @@ async def _seed_campaign(
     )
     print(f"    funded + confirmed campaign wallet: {wallet['address']} (tx {fund_tx[:16]}…)")
 
+    from datetime import date, timedelta
+
+    today = date.today()
     campaign = Campaign(
         id=f"e2e-{uuid4().hex[:12]}",
         advertiser_id=advertiser_id,
@@ -241,6 +273,9 @@ async def _seed_campaign(
         wallet_id=wallet["id"],
         wallet_address=wallet["address"],
         duration=15,
+        target_dmas=[E2E_TARGET_DMA_LABEL],
+        start_date=today,
+        end_date=today + timedelta(days=30),
     )
     db = SessionLocal()
     try:
@@ -294,7 +329,10 @@ def _bid_payload(publisher_wallet: str) -> dict[str, Any]:
             {
                 "id": "1",
                 "video": {"w": 1920, "h": 1080},
-                "ext": {"wallet_id": publisher_wallet},
+                "ext": {
+                    "wallet_id": publisher_wallet,
+                    "device_id": E2E_DEVICE_ID,
+                },
             }
         ],
     }

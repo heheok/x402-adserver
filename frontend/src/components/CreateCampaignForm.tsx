@@ -1,23 +1,30 @@
 import { useState } from "react";
 
-import StepDetails, { type CreatedCampaign } from "./wizard/StepDetails";
+import StepCalculator, { type Quote } from "./wizard/StepCalculator";
 import StepImage, { type CreativeAsset } from "./wizard/StepImage";
+import StepReview, { type CreatedCampaign } from "./wizard/StepReview";
+import StepSchedule, { type ScheduleWindow } from "./wizard/StepSchedule";
+import StepTargeting, { type TargetingSelection } from "./wizard/StepTargeting";
 
 type Props = {
   onCreated?: (campaign: CreatedCampaign) => void;
 };
 
-// Sessions 14 + 15 will insert "targeting", "schedule", "calculator" between
-// "image" and "details" and rename "details" to "review".
-type StepKey = "image" | "details";
+type StepKey = "image" | "targeting" | "schedule" | "calculator" | "review";
 
 const STEPS: { key: StepKey; label: string }[] = [
   { key: "image", label: "Creative" },
-  { key: "details", label: "Details & Fund" },
+  { key: "targeting", label: "Targeting" },
+  { key: "schedule", label: "Schedule" },
+  { key: "calculator", label: "Budget" },
+  { key: "review", label: "Review & Fund" },
 ];
 
 export default function CreateCampaignForm({ onCreated }: Props = {}) {
   const [creative, setCreative] = useState<CreativeAsset | null>(null);
+  const [targeting, setTargeting] = useState<TargetingSelection | null>(null);
+  const [schedule, setSchedule] = useState<ScheduleWindow | null>(null);
+  const [quote, setQuote] = useState<Quote | null>(null);
   const [step, setStep] = useState<StepKey>("image");
 
   const currentIndex = STEPS.findIndex((s) => s.key === step);
@@ -54,15 +61,52 @@ export default function CreateCampaignForm({ onCreated }: Props = {}) {
           initial={creative}
           onComplete={(asset) => {
             setCreative(asset);
-            setStep("details");
+            setStep("targeting");
           }}
         />
       )}
 
-      {step === "details" && creative && (
-        <StepDetails
-          creative={creative}
+      {step === "targeting" && (
+        <StepTargeting
+          initial={targeting}
           onBack={() => setStep("image")}
+          onComplete={(sel) => {
+            setTargeting(sel);
+            setStep("schedule");
+          }}
+        />
+      )}
+
+      {step === "schedule" && (
+        <StepSchedule
+          initial={schedule}
+          onBack={() => setStep("targeting")}
+          onComplete={(sch) => {
+            setSchedule(sch);
+            setStep("calculator");
+          }}
+        />
+      )}
+
+      {step === "calculator" && targeting && schedule && (
+        <StepCalculator
+          targeting={targeting}
+          schedule={schedule}
+          onBack={() => setStep("schedule")}
+          onComplete={(q) => {
+            setQuote(q);
+            setStep("review");
+          }}
+        />
+      )}
+
+      {step === "review" && creative && targeting && schedule && quote && (
+        <StepReview
+          creative={creative}
+          targeting={targeting}
+          schedule={schedule}
+          quote={quote}
+          onBack={() => setStep("calculator")}
           onCreated={onCreated}
         />
       )}

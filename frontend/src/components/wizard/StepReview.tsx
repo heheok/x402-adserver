@@ -9,6 +9,9 @@ import { humanizeError } from "../../lib/errors";
 import { solscanTxUrl, truncateAddress } from "../../lib/format";
 import { useWalletTrack } from "../../lib/walletTrack";
 import type { CreativeAsset } from "./StepImage";
+import type { Quote } from "./StepCalculator";
+import type { ScheduleWindow } from "./StepSchedule";
+import type { TargetingSelection } from "./StepTargeting";
 
 type WalletInfo = { wallet_address: string; usdc_balance: number };
 
@@ -20,26 +23,36 @@ type CampaignSummary = {
   spent: number;
   remaining: number;
   wallet_address: string;
+  protocol_fee_amount?: number | null;
+  protocol_fee_tx_hash?: string | null;
+  protocol_fee_solscan_url?: string | null;
 };
 
 export type CreatedCampaign = CampaignSummary & { tx_hash?: string };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
-const DEFAULT_FORM = {
-  name: "Demo campaign",
-  cpm_price: 1.0,
-  budget: 0.1,
-  duration: 15,
-};
-
 type Props = {
   creative: CreativeAsset;
+  targeting: TargetingSelection;
+  schedule: ScheduleWindow;
+  quote: Quote;
   onBack: () => void;
   onCreated?: (campaign: CreatedCampaign) => void;
 };
 
-export default function StepDetails({ creative, onBack, onCreated }: Props) {
+function fmtUsdc(n: number): string {
+  return n.toFixed(4);
+}
+
+export default function StepReview({
+  creative,
+  targeting,
+  schedule,
+  quote,
+  onBack,
+  onCreated,
+}: Props) {
   const api = useApi();
   const qc = useQueryClient();
   const { wallets } = useSolanaWallets();
@@ -55,7 +68,7 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
     enabled: wallets.length > 0,
   });
 
-  const [form, setForm] = useState(() => ({ ...DEFAULT_FORM }));
+  const [name, setName] = useState("Demo campaign");
   const [stage, setStage] = useState<
     "idle" | "preparing" | "signing" | "settling"
   >("idle");
@@ -76,17 +89,24 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
         return response;
       };
 
+      // 5% slack on top of the quoted escrow — covers tiny rounding/timing
+      // drift between the quote and the actual server-side compute on POST.
+      // The x402 client uses this as the max signed amount; the facilitator
+      // only ever charges what the server's PaymentRequirements specify.
       const client = createX402Client({
         wallet: wallets[0],
         network: "solana-devnet",
-        amount: BigInt(Math.ceil(form.budget * 1.05 * 1e6)),
+        amount: BigInt(Math.ceil(quote.total_to_escrow_usdc * 1.05 * 1e6)),
         customFetch: instrumentedFetch,
       });
 
       const body = {
-        ...form,
+        name,
         creative_url: creative.creative_url,
         creative_id: creative.creative_id,
+        target_dmas: targeting.target_dmas,
+        start_date: schedule.start_date,
+        end_date: schedule.end_date,
       };
 
       const res = await client.fetch(`${API_BASE}/api/campaigns`, {
@@ -137,13 +157,12 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
   const busy = submit.isPending;
   const balance = wallet.data?.usdc_balance ?? 0;
   const insufficientBalance =
-    wallet.data !== undefined && form.budget > balance + 1e-9;
+    wallet.data !== undefined &&
+    quote.total_to_escrow_usdc > balance + 1e-9;
   const canSubmit =
     !busy &&
     wallets.length > 0 &&
-    form.name.trim().length > 0 &&
-    form.cpm_price > 0 &&
-    form.budget > 0 &&
+    name.trim().length > 0 &&
     !insufficientBalance;
 
   const stageLabel =
@@ -157,7 +176,7 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
 
   return (
     <div>
-      <h3>Campaign details</h3>
+      <h3>Review & fund</h3>
       <p className="muted footnote">
         Funds via the x402 handshake: signing transfers USDC from your wallet to
         a fresh campaign wallet owned by the ad server.
@@ -167,7 +186,7 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
         style={{
           display: "flex",
           gap: "0.75rem",
-          alignItems: "center",
+          alignItems: "flex-start",
           margin: "0.75rem 0",
           padding: "0.5rem",
           border: "1px solid var(--border)",
@@ -182,7 +201,10 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
         />
         <div style={{ minWidth: 0, flex: 1 }}>
           <p className="muted footnote" style={{ margin: 0 }}>
-            Creative
+            Targeting · {targeting.target_dmas.join(", ")}
+          </p>
+          <p className="muted footnote" style={{ margin: 0 }}>
+            Schedule · {schedule.start_date} → {schedule.end_date}
           </p>
           <code
             style={{
@@ -190,6 +212,7 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              marginTop: "0.25rem",
             }}
           >
             {truncateAddress(creative.creative_id, 8)}
@@ -197,77 +220,68 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
         </div>
       </div>
 
+      <div
+        style={{
+          marginTop: "0.75rem",
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          background: "rgba(255,255,255,0.03)",
+          padding: "0.75rem",
+          display: "grid",
+          gridTemplateColumns: "auto 1fr",
+          rowGap: "0.35rem",
+          columnGap: "1rem",
+        }}
+      >
+        <span className="muted">Screens × days × plays</span>
+        <span>
+          {quote.screens.toLocaleString()} × {quote.days} × {quote.plays_per_screen_per_day} ={" "}
+          {quote.total_plays.toLocaleString()}
+        </span>
+        <span className="muted">Campaign total</span>
+        <span>{fmtUsdc(quote.total_usdc)} USDC</span>
+        <span className="muted">
+          Protocol fee ({(quote.protocol_fee_pct * 100).toFixed(1)}%)
+        </span>
+        <span>{fmtUsdc(quote.protocol_fee_usdc)} USDC</span>
+        <span style={{ fontWeight: 600 }}>Total to escrow</span>
+        <span style={{ fontWeight: 600 }}>
+          {fmtUsdc(quote.total_to_escrow_usdc)} USDC
+        </span>
+      </div>
+
       <form
         className="form"
+        style={{ marginTop: "1rem" }}
         onSubmit={(e) => {
           e.preventDefault();
           submit.mutate();
         }}
       >
         <label>
-          <span>Name</span>
+          <span>Campaign name</span>
           <input
             type="text"
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
             disabled={busy}
             required
           />
         </label>
 
-        <div className="row">
-          <label>
-            <span>CPM (USDC)</span>
-            <input
-              type="number"
-              step="0.01"
-              min="0.01"
-              value={form.cpm_price}
-              onChange={(e) =>
-                setForm({ ...form, cpm_price: Number(e.target.value) })
-              }
-              disabled={busy}
-              required
-            />
-          </label>
-
-          <label>
-            <span>Budget (USDC)</span>
-            <input
-              type="number"
-              step="0.001"
-              min="0.001"
-              value={form.budget}
-              onChange={(e) =>
-                setForm({ ...form, budget: Number(e.target.value) })
-              }
-              disabled={busy}
-              required
-            />
-          </label>
-
-          <label>
-            <span>Duration (s)</span>
-            <input
-              type="number"
-              min="1"
-              max="30"
-              value={form.duration}
-              onChange={(e) =>
-                setForm({ ...form, duration: Number(e.target.value) })
-              }
-              disabled={busy}
-              required
-            />
-          </label>
-        </div>
-
         <div className="actions">
-          <button type="button" className="secondary" onClick={onBack} disabled={busy}>
+          <button
+            type="button"
+            className="secondary"
+            onClick={onBack}
+            disabled={busy}
+          >
             Back
           </button>
           <button type="submit" disabled={!canSubmit}>
-            {busy ? "Funding…" : `Create & fund (${form.budget} USDC)`}
+            {busy
+              ? "Funding…"
+              : `Confirm & fund (${fmtUsdc(quote.total_to_escrow_usdc)} USDC)`}
           </button>
           {stageLabel && (
             <span className="pending">
@@ -282,8 +296,8 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
 
       {insufficientBalance && !submit.isError && (
         <p className="error">
-          Budget {form.budget} USDC exceeds your wallet balance of{" "}
-          {balance.toFixed(4)} USDC. Hit "Get test USDC" first.
+          Total to escrow {fmtUsdc(quote.total_to_escrow_usdc)} USDC exceeds your
+          wallet balance of {balance.toFixed(4)} USDC. Hit "Get test USDC" first.
         </p>
       )}
 
@@ -304,6 +318,18 @@ export default function StepDetails({ creative, onBack, onCreated }: Props) {
                 rel="noreferrer"
               >
                 {truncateAddress(result.tx_hash, 6)}
+              </a>
+            </p>
+          )}
+          {result.protocol_fee_tx_hash && result.protocol_fee_solscan_url && (
+            <p className="footnote">
+              Protocol fee tx:{" "}
+              <a
+                href={result.protocol_fee_solscan_url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {truncateAddress(result.protocol_fee_tx_hash, 6)}
               </a>
             </p>
           )}

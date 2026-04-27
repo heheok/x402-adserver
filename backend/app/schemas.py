@@ -1,6 +1,12 @@
+from datetime import date, datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from .services.venues import DMA_LABELS
+
+
+CANONICAL_DMA_LABELS: set[str] = set(DMA_LABELS.values())
 
 
 class HealthResponse(BaseModel):
@@ -20,12 +26,33 @@ class FaucetResponse(BaseModel):
 
 
 class CreateCampaignRequest(BaseModel):
+    """Session 15: body shrinks to creative + targeting + schedule. CPM,
+    budget, duration are server-derived (DEMO_CPM, compute_quote, default
+    spot length) — clients don't get to negotiate them.
+    """
+
     name: str
     creative_url: str
     creative_id: str
-    cpm_price: float = Field(gt=0)
-    budget: float = Field(gt=0)
-    duration: int = Field(ge=1, le=30, default=15)
+    target_dmas: list[str] = Field(min_length=1)
+    start_date: date
+    end_date: date
+
+    @model_validator(mode="after")
+    def _validate_targeting_and_schedule(self):
+        unknown = [d for d in self.target_dmas if d not in CANONICAL_DMA_LABELS]
+        if unknown:
+            raise ValueError(
+                f"unknown DMAs: {unknown!r} — expected one of {sorted(CANONICAL_DMA_LABELS)}"
+            )
+        if len(set(self.target_dmas)) != len(self.target_dmas):
+            raise ValueError("target_dmas contains duplicates")
+        today = datetime.now(timezone.utc).date()
+        if self.start_date < today:
+            raise ValueError(f"start_date {self.start_date} is in the past (today: {today})")
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be >= start_date")
+        return self
 
 
 class CampaignSummary(BaseModel):
@@ -36,6 +63,12 @@ class CampaignSummary(BaseModel):
     spent: float
     remaining: float
     wallet_address: str
+    target_dmas: list[str] | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    protocol_fee_amount: float | None = None
+    protocol_fee_tx_hash: str | None = None
+    protocol_fee_solscan_url: str | None = None
 
 
 class SettlementSummary(BaseModel):
@@ -58,6 +91,12 @@ class CampaignStats(BaseModel):
     total_plays: int
     total_confirmed_usdc: float
     cpm_price: float
+    target_dmas: list[str] | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    protocol_fee_amount: float | None = None
+    protocol_fee_tx_hash: str | None = None
+    protocol_fee_solscan_url: str | None = None
     recent_settlements: list[SettlementSummary]
 
 
@@ -72,6 +111,49 @@ class SimulatePlayResponse(BaseModel):
     tx_hash: str
     solscan_url: str
     publisher_wallet: str
+    # DMA-only on purpose: venue name identifies a specific publisher partner
+    # and isn't something we want to leak to advertisers via the API. Server-
+    # side logs (auto-play) still include the venue for ops debugging.
+    dma: str | None = None
+
+
+class MarketInfo(BaseModel):
+    dma: str
+    display_count: int
+
+
+class QuoteRequest(BaseModel):
+    target_dmas: list[str] = Field(min_length=1)
+    start_date: date
+    end_date: date
+
+    @model_validator(mode="after")
+    def _validate(self):
+        unknown = [d for d in self.target_dmas if d not in CANONICAL_DMA_LABELS]
+        if unknown:
+            raise ValueError(
+                f"unknown DMAs: {unknown!r} — expected one of {sorted(CANONICAL_DMA_LABELS)}"
+            )
+        if len(set(self.target_dmas)) != len(self.target_dmas):
+            raise ValueError("target_dmas contains duplicates")
+        today = datetime.now(timezone.utc).date()
+        if self.start_date < today:
+            raise ValueError(f"start_date {self.start_date} is in the past (today: {today})")
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be >= start_date")
+        return self
+
+
+class QuoteResponse(BaseModel):
+    screens: int
+    plays_per_screen_per_day: int
+    days: int
+    total_plays: int
+    cpm_price: float
+    total_usdc: float
+    protocol_fee_pct: float
+    protocol_fee_usdc: float
+    total_to_escrow_usdc: float
 
 
 class BidRequest(BaseModel):
