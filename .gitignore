@@ -16,7 +16,8 @@ venv/
 backend/.secrets/
 
 # data
-backend/data/
+backend/data/*
+!backend/data/venues.example.json
 *.db
 *.sqlite
 

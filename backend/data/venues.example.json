@@ -1,0 +1,38 @@
+[
+  {
+    "device_id": "demo-device-ny-01",
+    "venue_id": "demo-venue-ny-01",
+    "dma": "ny",
+    "venue_name": "Demo Cafe NYC"
+  },
+  {
+    "device_id": "demo-device-la-01",
+    "venue_id": "demo-venue-la-01",
+    "dma": "la",
+    "venue_name": "Demo Diner LA"
+  },
+  {
+    "device_id": "demo-device-sf-01",
+    "venue_id": "demo-venue-sf-01",
+    "dma": "sf",
+    "venue_name": "Demo Coffee SF"
+  },
+  {
+    "device_id": "demo-device-mia-01",
+    "venue_id": "demo-venue-mia-01",
+    "dma": "mia",
+    "venue_name": "Demo Lounge Miami"
+  },
+  {
+    "device_id": "demo-device-bos-01",
+    "venue_id": "demo-venue-bos-01",
+    "dma": "bos",
+    "venue_name": "Demo Pub Boston"
+  },
+  {
+    "device_id": "demo-device-aus-01",
+    "venue_id": "demo-venue-aus-01",
+    "dma": "aus",
+    "venue_name": "Demo Taqueria Austin"
+  }
+]

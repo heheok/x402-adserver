@@ -311,9 +311,12 @@ Expected log line:
 venues loaded: N devices across 6 DMAs (skipped: M empty-dma, 0 unknown-dma)
 ```
 
-If the file is missing, the loader logs a warning and `/bid` will reject
-every request as no-bid (no DMA can be resolved). `/api/markets` returns
-an empty list.
+If the file is missing, the loader falls back to the committed
+`backend/data/venues.example.json` — one fake venue per DMA, enough to
+keep the demo loop runnable on a fresh clone before someone runs the
+Compass export. Loud warning in the logs so it's clear which dataset is
+loaded. With neither file present, `/bid` returns no-bid for every
+request and `/api/markets` returns an empty list.
 
 ### DMA codes
 

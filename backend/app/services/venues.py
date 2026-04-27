@@ -43,6 +43,12 @@ DMA_LABELS: dict[str, str] = {
 # override by passing a different path to `_load_venues`.
 DEFAULT_VENUES_PATH = Path("data/venues.json")
 
+# Committed fallback (one venue per DMA). Used when the real publisher
+# inventory hasn't been provisioned yet — keeps the demo loop runnable on a
+# fresh clone before someone runs the Compass export. Logged loudly at load
+# time so it's not mistaken for real data.
+EXAMPLE_VENUES_PATH = Path("data/venues.example.json")
+
 
 class VenuesIndex:
     """In-memory inventory lookup. Built once, read many times.
@@ -109,11 +115,21 @@ class VenuesIndex:
 
 def _load_venues(path: Path) -> VenuesIndex:
     if not path.exists():
-        logger.warning(
-            "venues file not found at %s — DMA targeting will reject all bids",
-            path,
-        )
-        return VenuesIndex({}, {}, {}, {})
+        if EXAMPLE_VENUES_PATH.exists():
+            logger.warning(
+                "venues file not found at %s — falling back to %s "
+                "(one fake venue per DMA; replace with real Mongo export per RUNBOOK)",
+                path,
+                EXAMPLE_VENUES_PATH,
+            )
+            path = EXAMPLE_VENUES_PATH
+        else:
+            logger.warning(
+                "venues file not found at %s and no example fallback — "
+                "DMA targeting will reject all bids",
+                path,
+            )
+            return VenuesIndex({}, {}, {}, {})
 
     raw = json.loads(path.read_text(encoding="utf-8"))
 
