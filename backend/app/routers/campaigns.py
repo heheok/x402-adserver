@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import Settings, get_settings
@@ -416,14 +417,14 @@ def campaign_stats(
 ) -> CampaignStats:
     c = _owned_campaign(db, campaign_id, advertiser)
 
-    confirmed = (
-        db.query(Settlement)
-        .filter(
-            Settlement.campaign_id == c.id,
-            Settlement.status == SettlementStatus.CONFIRMED.value,
-        )
-        .all()
-    )
+    total_plays, total_confirmed_usdc = db.query(
+        func.count(Settlement.id),
+        func.coalesce(func.sum(Settlement.amount_usdc), 0),
+    ).filter(
+        Settlement.campaign_id == c.id,
+        Settlement.status == SettlementStatus.CONFIRMED.value,
+    ).one()
+
     recent = (
         db.query(Settlement)
         .filter(Settlement.campaign_id == c.id)
@@ -444,15 +445,35 @@ def campaign_stats(
         .count()
     )
 
+    # Lifetime per-DMA play counts. Drives the live activity map's per-marker
+    # tween. NULL device_id rows (legacy + auto-play before Session 16.5) are
+    # dropped by the GROUP BY same as before; devices no longer in the venues
+    # file resolve to None and bucket under "Unknown".
+    by_device = (
+        db.query(Settlement.device_id, func.count(Settlement.id))
+        .filter(
+            Settlement.campaign_id == c.id,
+            Settlement.status == SettlementStatus.CONFIRMED.value,
+            Settlement.device_id.isnot(None),
+        )
+        .group_by(Settlement.device_id)
+        .all()
+    )
+    venues = get_venues_index()
+    plays_by_dma: dict[str, int] = {}
+    for device_id, n in by_device:
+        label = venues.label_for_device(device_id) or "Unknown"
+        plays_by_dma[label] = plays_by_dma.get(label, 0) + int(n)
+
     return CampaignStats(
         campaign_id=c.id,
         status=c.status,
         budget=float(c.budget),
         spent=float(c.spent),
         remaining_budget=float(c.budget) - float(c.spent),
-        total_plays=len(confirmed),
+        total_plays=total_plays,
         last_24h_plays=last_24h_plays,
-        total_confirmed_usdc=sum(float(s.amount_usdc) for s in confirmed),
+        total_confirmed_usdc=float(total_confirmed_usdc),
         cpm_price=float(c.cpm_price),
         target_dmas=c.target_dmas,
         start_date=c.start_date,
@@ -462,6 +483,7 @@ def campaign_stats(
         else None,
         protocol_fee_tx_hash=c.protocol_fee_tx_hash,
         protocol_fee_solscan_url=_solscan_tx_url(c.protocol_fee_tx_hash),
+        plays_by_dma=plays_by_dma,
         recent_settlements=[_to_settlement_summary(s) for s in recent],
     )
 

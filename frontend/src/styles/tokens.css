@@ -194,3 +194,78 @@ button { font: inherit; color: inherit; }
   -webkit-mask-composite: xor; mask-composite: exclude;
   pointer-events: none;
 }
+
+/* Per-campaign live activity map (Session 16.7) ------------------------- */
+.x-map {
+  width: 100%;
+  height: 240px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line-1);
+  background: var(--bg-1);
+  /* Leaflet panes default to z-index 200-700 in the global stacking
+     context; without isolation, marker pins bleed above any modal. */
+  position: relative;
+  z-index: 0;
+  isolation: isolate;
+}
+.x-map .leaflet-container {
+  background: var(--bg-1);
+  font-family: var(--font-sans);
+}
+.x-map .leaflet-control-attribution {
+  background: rgba(7,8,12,0.65);
+  color: var(--tx-2);
+  font-size: 10px;
+  padding: 2px 6px;
+}
+.x-map .leaflet-control-attribution a {
+  color: var(--tx-1);
+}
+/* Reset leaflet's default white box around divIcon. */
+.x-map-pin {
+  background: transparent !important;
+  border: 0 !important;
+}
+.x-map-pin__inner {
+  position: relative;
+  transform: translate(-50%, -100%);
+  transform-origin: 50% 100%;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(20,241,149,0.95), rgba(0,194,255,0.95));
+  color: #07080C;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  box-shadow: 0 4px 16px rgba(20,241,149,0.35), 0 0 0 1px rgba(255,255,255,0.18);
+  white-space: nowrap;
+  will-change: transform, box-shadow;
+}
+@keyframes x-map-pin-punch {
+  0%   { transform: translate(-50%, -100%) scale(1);
+         box-shadow: 0 4px 16px rgba(20,241,149,0.35), 0 0 0 1px rgba(255,255,255,0.18); }
+  35%  { transform: translate(-50%, -100%) scale(1.28);
+         box-shadow: 0 6px 28px rgba(20,241,149,0.7), 0 0 0 2px rgba(255,255,255,0.28); }
+  100% { transform: translate(-50%, -100%) scale(1);
+         box-shadow: 0 4px 16px rgba(20,241,149,0.35), 0 0 0 1px rgba(255,255,255,0.18); }
+}
+.x-map-pin__inner--punch {
+  animation: x-map-pin-punch 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.x-map-pin__count {
+  font-size: 13px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.x-map-pin__label {
+  font-size: 9px;
+  line-height: 1;
+  text-transform: uppercase;
+  opacity: 0.78;
+}

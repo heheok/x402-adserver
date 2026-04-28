@@ -195,6 +195,84 @@ clears it.
 
 ---
 
+## Audit reconciliation
+
+`scripts/audit_ledger.py` is a read-only health check that compares DB state
+against on-chain USDC balances. Run it post-deploy, after a stress test, or
+whenever a user reports a payment issue. ~5 seconds runtime.
+
+```bash
+docker compose run --rm backend python scripts/audit_ledger.py
+```
+
+Three sections, each with its own pass criteria:
+
+### 1. Publisher reconciliation
+For each `publisher_wallet` that has received any confirmed settlement, sums
+`amount_usdc` from the DB and compares to on-chain USDC balance.
+
+| Flag | Meaning | Action |
+| --- | --- | --- |
+| `OK` | DB sum within 1e-6 of on-chain | nothing |
+| `SHORT` | on-chain *less* than DB says we paid | **bug** — settlement minted but didn't land |
+| `MORE` | on-chain *more* than DB says | external inflow (other ad networks, manual transfers) — fine for real publishers, suspicious for the demo publisher in isolation |
+
+### 2. Campaign wallet reconciliation
+Per campaign, expected on-chain USDC depends on lifecycle:
+
+| Status | Expected USDC |
+| --- | --- |
+| `draft` | 0 (never funded) |
+| `active`/`paused`/`completed`/`expired` | `budget - spent` (+ `protocol_fee_amount` if fee tx never confirmed) |
+| `refunded` | 0 (+ orphaned fee if `protocol_fee_tx_hash` is null — see BACKEND-REVIEW.md §1.1) |
+
+Tolerance is 1e-3 USDC for active campaigns (covers float-math dust per
+must-fix #3). Anything larger flags `DRIFT`.
+
+The script also prints `Total stranded USDC across refunded campaigns` and
+`Of that, declared orphaned fee` — these quantify §1.1's leak in dollars.
+
+### 3. Service wallets
+Just prints SOL + USDC for treasury, protocol revenue, helpers, and demo
+publisher. No expected vs actual — these fluctuate by design.
+
+### Forensic recipe — what did this tx actually transfer?
+
+When the audit shows DRIFT and you need to know *exactly* what happened
+on-chain, decode the tx's pre/post token balances:
+
+```bash
+docker compose exec backend python -c "
+import asyncio, sys
+sys.path.insert(0, '/app')
+from solana.rpc.async_api import AsyncClient
+from solders.signature import Signature
+from app.config import get_settings
+
+TX = '<tx hash from DB or Solscan>'
+
+async def main():
+    settings = get_settings()
+    async with AsyncClient(settings.solana_rpc_url) as c:
+        sig = Signature.from_string(TX)
+        resp = await c.get_transaction(sig, max_supported_transaction_version=0, encoding='jsonParsed')
+        meta = resp.value.transaction.meta
+        pre  = {b.account_index: float(b.ui_token_amount.ui_amount or 0) for b in (meta.pre_token_balances or [])}
+        post = {b.account_index: float(b.ui_token_amount.ui_amount or 0) for b in (meta.post_token_balances or [])}
+        for i in sorted(set(pre) | set(post)):
+            print(f'idx={i} delta={post.get(i,0) - pre.get(i,0):+.6f}')
+
+asyncio.run(main())
+"
+```
+
+Used 2026-04-28 to confirm a refunded campaign's stranded 0.031 USDC was
+pre-Session-16.5 dedup damage (refund tx really did send `budget - spent`,
+the strand was 62 phantom-confirmed plays where the on-chain transfer
+network-deduped before the memo fix).
+
+---
+
 ## Retry pending-failed settlements
 
 `POST /proof` writes a failed `Settlement` row when Privy or the facilitator
@@ -510,6 +588,80 @@ docker compose exec backend sqlite3 /app/data/adserver.db
 SELECT id, status, budget, spent FROM campaigns;
 .quit
 ```
+
+### Hygiene reset (drain + DB wipe)
+
+The "Reset the DB" command above only wipes Python-side state. After running
+the demo for a while you also accumulate stranded USDC in per-campaign Privy
+server wallets, helpers, the protocol-revenue wallet, and the demo publisher.
+Privy doesn't support wallet deletion, so the wallets persist forever — but
+their contents can be swept back to treasury before wiping the DB.
+
+This is the right routine pre-deploy or whenever you want a clean baseline
+for an audit run.
+
+Use it to draw a known-clean line: any subsequent drift in `audit_ledger.py`
+is a real bug, not legacy.
+
+#### Sequence
+```bash
+# 1. Stop the long-running backend (auto-play would fight the sweep on shared SQLite)
+docker compose stop backend
+
+# 2. Dry-run sweep — prints every wallet + USDC/SOL it would touch, no on-chain txs
+docker compose run --rm backend python scripts/sweep_to_treasury.py
+
+# 3. Eyeball the dry-run. Confirm the destination is your treasury and the
+#    amounts look sane. Then execute:
+docker compose run --rm backend python scripts/sweep_to_treasury.py --execute
+
+# 4. Wipe the DB
+rm backend/data/adserver.db
+
+# 5. Restart — create_all rebuilds empty tables on boot
+docker compose start backend
+
+# 6. Confirm clean baseline
+docker compose run --rm backend python scripts/audit_ledger.py
+```
+
+#### What gets swept
+- All campaign wallets in the DB (`campaigns.wallet_id` / `.wallet_address`)
+- Helper wallets (`HELPER_WALLET_IDS` / `_ADDRESSES`)
+- Protocol revenue wallet
+- Demo publisher (looked up via Privy `list_wallets` by address match)
+
+#### What does NOT get swept
+- **Treasury** — the destination
+- **Advertiser embedded wallets** — owned by Privy users, not server wallets.
+  The dev's own test wallet keeps its funds; on next login the dashboard shows
+  whatever was left there. If a controlled simulation needs a clean advertiser
+  wallet, sweep that one wallet manually via a one-off Privy `sign_and_send`.
+
+#### Gas-seed pre-pass
+Wallets with USDC but zero SOL (typically protocol revenue + demo publisher,
+which only ever received USDC inflows) can't pay their own tx fee. The script
+detects this and treasury fronts 0.001 SOL before the USDC sweep. Total cost
+~0.002 SOL across the two wallets — negligible.
+
+#### Failure modes
+- **`transaction_broadcast_failure` retry warnings** during the gas-seed
+  → USDC sweep window are expected. Privy's simulation read-replica trails
+  devnet by tens of seconds; the existing retry-with-backoff in
+  `sign_and_send_solana` handles it. Each affected wallet typically needs
+  2-3 retries; `reference_id` gives Privy-side idempotency so duplicate
+  broadcasts are safe.
+- If the sweep fails partway, just re-run — the script reads live balances
+  on each invocation, so partial failures are idempotent.
+
+#### Post-reset
+- Helpers, protocol-revenue, and demo-publisher each retain ~0.001 SOL
+  (the `SOL_BUFFER_LAMPORTS` left for future fee headroom). Their accounts
+  stay alive on Solana.
+- Pre-existing campaign wallets in Privy still exist, but with ~0 USDC and
+  ~0 SOL above the buffer. Future flows that try to reuse them will need
+  to re-seed — but in practice every new campaign creates a fresh wallet,
+  so they're orphans.
 
 ---
 

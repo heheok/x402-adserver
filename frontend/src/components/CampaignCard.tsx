@@ -14,6 +14,7 @@ import { solscanAccountUrl, truncateAddress } from "../lib/format";
 import { useWalletTrack } from "../lib/walletTrack";
 import CreativeThumb from "./ui/CreativeThumb";
 import Icon from "./ui/Icon";
+import { LiveActivityMap } from "./LiveActivityMap";
 import Progress from "./ui/Progress";
 import Solscan from "./ui/Solscan";
 import StatusBadge from "./ui/StatusBadge";
@@ -416,6 +417,13 @@ export default function CampaignCard({
                 {(campaign.budget - campaign.spent).toFixed(4)}
               </span>
             }
+            sub={
+              campaign.wallet_address ? (
+                <Solscan href={solscanAccountUrl(campaign.wallet_address)}>
+                  wallet {truncateAddress(campaign.wallet_address, 4)}
+                </Solscan>
+              ) : null
+            }
           />
           <Stat
             label="Protocol fee"
@@ -423,6 +431,14 @@ export default function CampaignCard({
               campaign.protocol_fee_amount != null
                 ? campaign.protocol_fee_amount.toFixed(4)
                 : "—"
+            }
+            sub={
+              campaign.protocol_fee_tx_hash &&
+              campaign.protocol_fee_solscan_url ? (
+                <Solscan href={campaign.protocol_fee_solscan_url}>
+                  tx {truncateAddress(campaign.protocol_fee_tx_hash, 4)}
+                </Solscan>
+              ) : null
             }
           />
           <Stat
@@ -610,6 +626,15 @@ export default function CampaignCard({
           </div>
         </div>
 
+        {campaign.target_dmas && campaign.target_dmas.length > 0 && (
+          <div style={{ marginTop: 18 }}>
+            <LiveActivityMap
+              targetDmas={campaign.target_dmas}
+              playsByDma={stats.data?.plays_by_dma ?? {}}
+            />
+          </div>
+        )}
+
         {actionError && (
           <p
             style={{
@@ -621,25 +646,6 @@ export default function CampaignCard({
           >
             {actionError}
           </p>
-        )}
-
-        {campaign.protocol_fee_tx_hash && campaign.protocol_fee_solscan_url && (
-          <div
-            style={{
-              marginTop: 12,
-              fontSize: 11,
-              color: "var(--tx-2)",
-              fontFamily: "var(--font-mono)",
-              display: "flex",
-              gap: 6,
-              alignItems: "center",
-            }}
-          >
-            protocol fee tx
-            <Solscan href={campaign.protocol_fee_solscan_url}>
-              {truncateAddress(campaign.protocol_fee_tx_hash, 4)}
-            </Solscan>
-          </div>
         )}
 
         <hr className="x-hr" style={{ margin: "18px 0" }} />
@@ -799,10 +805,12 @@ function Stat({
   label,
   value,
   small,
+  sub,
 }: {
   label: string;
   value: ReactNode;
   small?: boolean;
+  sub?: ReactNode;
 }) {
   return (
     <div>
@@ -827,6 +835,21 @@ function Stat({
       >
         {value}
       </div>
+      {sub && (
+        <div
+          style={{
+            marginTop: 6,
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+            color: "var(--tx-2)",
+            display: "flex",
+            gap: 4,
+            alignItems: "center",
+          }}
+        >
+          {sub}
+        </div>
+      )}
     </div>
   );
 }

@@ -31,6 +31,7 @@ export type StatsRow = {
   total_plays: number;
   last_24h_plays: number;
   total_confirmed_usdc: number;
+  plays_by_dma?: Record<string, number>;
   recent_settlements: SettlementRow[];
 };
 

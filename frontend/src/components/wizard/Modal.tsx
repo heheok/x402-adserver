@@ -53,7 +53,7 @@ export default function Modal({
         alignItems: "flex-start",
         justifyContent: "center",
         padding: "60px 16px",
-        zIndex: 100,
+        zIndex: 1000,
         overflow: "auto",
       }}
       onClick={(e) => {

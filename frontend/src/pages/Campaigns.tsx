@@ -6,7 +6,6 @@ import type { CampaignRow } from "../lib/aggregations";
 import { humanizeError } from "../lib/errors";
 import CampaignCard from "../components/CampaignCard";
 import Icon from "../components/ui/Icon";
-import StatusBadge from "../components/ui/StatusBadge";
 
 type AutoPlayStatus = { enabled: boolean; interval_seconds: number };
 

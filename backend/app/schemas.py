@@ -103,6 +103,10 @@ class CampaignStats(BaseModel):
     protocol_fee_amount: float | None = None
     protocol_fee_tx_hash: str | None = None
     protocol_fee_solscan_url: str | None = None
+    # Lifetime confirmed-play counts bucketed by DMA. Powers the
+    # per-campaign live activity map (Session 16.7). Monotonic-up; no time
+    # cutoff so map markers never tick down. Bounded by ≤6 keys.
+    plays_by_dma: dict[str, int] = {}
     recent_settlements: list[SettlementSummary]
 
 
