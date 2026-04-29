@@ -383,7 +383,9 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
                   color:
                     s.status === "confirmed"
                       ? "var(--sol-teal)"
-                      : "var(--st-expired)",
+                      : s.status === "pending" || s.status === "flushing"
+                        ? "var(--tx-2)"
+                        : "var(--st-expired)",
                   textAlign: "right",
                 }}
               >
@@ -396,6 +398,16 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
                   <Solscan href={s.solscan_url}>
                     {truncateAddress(s.tx_hash, 4)}
                   </Solscan>
+                ) : s.status === "pending" || s.status === "flushing" ? (
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: "var(--tx-2)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    queued
+                  </span>
                 ) : (
                   <span
                     style={{

@@ -18,6 +18,7 @@ from .routers import (
     wallet,
 )
 from .services.auto_play import run_auto_play_loop
+from .services.batch_settler import run_batch_settler_loop
 
 
 def _configure_logging() -> None:
@@ -37,14 +38,20 @@ async def lifespan(app: FastAPI):
     init_db()
     stop_event = asyncio.Event()
     auto_play_task = asyncio.create_task(run_auto_play_loop(stop_event))
+    # Session 16.8: batch settler emits the actual on-chain transfers for
+    # /proof + simulate-play + auto-play, all of which now just queue
+    # pending Settlement rows. Shares the stop_event so SIGTERM cleanly
+    # winds down both loops.
+    batch_settler_task = asyncio.create_task(run_batch_settler_loop(stop_event))
     try:
         yield
     finally:
         stop_event.set()
-        try:
-            await asyncio.wait_for(auto_play_task, timeout=5.0)
-        except asyncio.TimeoutError:
-            auto_play_task.cancel()
+        for task in (auto_play_task, batch_settler_task):
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
 
 
 def create_app() -> FastAPI:

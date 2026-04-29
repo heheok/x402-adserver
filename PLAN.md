@@ -448,25 +448,156 @@ frontend, so adding visible features after deploy is more painful than
 before. Cost ≈ half a session — the count-up hook + the new server field
 are small.
 
-### Session 16.6 IMPORTANT! DISCOVERED WHEN LETTING THE AUTOPLAY RUN FOR A LONG TIME
+### Session 16.6 — SOL exhaustion + RPC-rate-limit drift (resolved by 16.8) ✅
 
-After letting the autoplay run for a long time one of the campaigns proof transactions started failing. with following error:
-2026-04-28 21:02:37 2026-04-28 18:02:37,736 ERROR app.routers.proof :: settlement failed campaign=ac89a867-d1c6-4ba8-8b43-8b0ee001f2f7 nonce=auto-d7bd109cd3de4b14ac9d0e07c53a63ad publisher=3pMCrwRq5tNy1GdonrPivP389eYjeeoGTiMZDtQmV8W9 amount=0.0005
-2026-04-28 21:02:37 Traceback (most recent call last):
-2026-04-28 21:02:37 File "/app/app/routers/proof.py", line 151, in execute_settlement
-2026-04-28 21:02:37 tx_hash = await privy.sign_and_send_solana(
-2026-04-28 21:02:37 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-2026-04-28 21:02:37 File "/app/app/services/privy.py", line 158, in sign_and_send_solana
-2026-04-28 21:02:37 raise last_error
-2026-04-28 21:02:37 app.services.privy.PrivyError: privy error 400: {"error":"Error broadcasting transaction with message: Error: Transaction simulation failed: Transaction results in an account (0) with insufficient funds for rent","code":"transaction_broadcast_failure"}
-2026-04-28 21:02:37 2026-04-28 18:02:37,745 INFO app.services.auto_play :: auto-play skipped campaign=ac89a867-d1c6-4ba8-8b43-8b0ee001f2f7 status=502 detail=settlement failed: privy error 400: {"error":"Error broadcasting transaction with message: Error: Transaction simulation failed: Transaction results in an account (0) with insufficient funds for rent","code":"transaction_broadcast_failure"}
-2026-04-28 21:02:37 2026-04-28 18:02:37,776 INFO httpx :: HTTP Request: POST https://api.privy.io/v1/wallets/auomdybdb0uqanubb4f632xc/rpc "HTTP/1.1 400 Bad Request
-I digged in and understand that this is because the campaign wallet SOL amount was almost at minimum (rent?) so privy didnt allow further transactions. This created a drift in the ledger checks.
-We need to solve this before doing anything else.
+**Discovery (2026-04-28):** after letting auto-play run for hours, one
+campaign's proof transactions started failing with
+`InsufficientFundsForRent` from Privy:
 
-- [ ] Discuss a solution
-- [ ] Fix the issue.
-- [ ] Fix the drift.
+```
+ERROR app.routers.proof :: settlement failed campaign=ac89a867…
+PrivyError: privy error 400: Transaction simulation failed: Transaction
+results in an account (0) with insufficient funds for rent
+```
+
+The campaign wallet had drained its 0.01 SOL seed paying validator fees
+across hundreds of plays; Privy's simulation rejected further txs to
+preserve the rent-exempt minimum. Two compounding drift sources came
+out of the diagnostic work:
+
+1. **SOL exhaustion** — fixed by an iteration that ships in the
+   committed-to-main work alongside Session 16.8: right-sized SOL seed
+   at creation time (`services/calc.required_sol_seed_lamports`) +
+   refund-time SOL sweep back to treasury
+   (`services/solana.get_sol_lamports` + sweep block in
+   `routers/campaigns.refund_campaign`). The seed is `6_000 lamports per
+   total_play + 50_000 reserve`, computed from the calculator's
+   `total_plays`. Way more than enough for batch model since plays no
+   longer map 1:1 to txs.
+2. **RPC-rate-limit drift** — fixed by Session 16.8 (batch settlement).
+   The α + γ_safe + γ_extra iteration (added wait_for_tx_confirmation +
+   late-landing get_signature_status check) fixed one drift direction
+   (false-confirmed-without-landing), but exposed another: under devnet
+   RPC's 4 req/s/method limit, both wait + γ_extra went blind, returned
+   None, and the compensating UPDATE wrongly rolled back txs that
+   actually landed. Per-play architecture was wrong; batch model
+   leaves rows pending on RPC blindness.
+
+- [x] Discuss a solution → BATCH-SETTLEMENTS.md (Session 16.8 brief)
+- [x] Fix the issue → Session 16.8 batch settlement landed; α + γ work
+      preserved as foundation (wait + γ_extra moved into
+      `services/batch_settler.flush_group`)
+- [x] Fix the drift → 0.0055 USDC publisher MORE / campaigns DRIFT
+      cleaned via `scripts/cleanup_drift_reverse.py` (publisher →
+      campaigns split: 0.0030 to c298e3bc, 0.0025 to ac89a867; audit
+      returned zero across all flags before new code processed
+      anything)
+
+### Session 16.8 — Batch settlements ✅
+
+Replaced per-play on-chain settlement with `pending → flushing →
+confirmed | failed` state model. `/proof`, simulate-play, and auto-play
+all just write a `pending` Settlement row and return sub-100ms.
+Background `services/batch_settler.run_batch_settler_loop` flushes
+pending rows every `BATCH_FLUSH_INTERVAL_SECONDS` (default 5s),
+grouping by `(campaign_id, publisher_wallet)` and emitting one Solana
+USDC transfer per group with deterministic
+`reference_id = batch-{campaign[:8]}-{first_nonce[:8]}`.
+
+**Full design + file-by-file plan + edge cases + UI changes + drift
+cleanup steps:** see `BATCH-SETTLEMENTS.md` (root of repo).
+
+- [x] Read `BATCH-SETTLEMENTS.md` end-to-end before any code
+- [x] **Decision: stay on public devnet RPC** (skip the private-RPC
+      switch the brief recommended). Per-method limit is 4 req/s; new
+      architecture's RPC pressure scales with O(active campaigns), not
+      O(plays/sec) — at 3 campaigns + 2s polling we're at ~1.5 req/s
+      sustained, well under the limit. RPC blindness leaves rows
+      pending instead of compensating, so even brief spikes self-heal.
+      Validated.
+- [x] Clean up the existing 0.0055 USDC drift via
+      `scripts/cleanup_drift_reverse.py` — publisher → campaigns split
+      (0.0030 to c298e3bc + 0.0025 to ac89a867). Audit returned zero
+      across all flags before new code processed anything.
+- [x] Implement per the file-by-file plan in §5 of the brief
+- [x] All acceptance criteria in §10 pass _(soak test pending: user
+      running 30-min auto-play loop in real time)_
+
+**Atomic claim added beyond what the brief specified:** the `flushing`
+intermediate state. `_claim_pending` runs `UPDATE settlements SET
+status='flushing' WHERE id IN (...) AND status='pending'` before
+processing — closes a race where `flush_campaign` (refund handler) and
+`flush_all` (background loop) could both pick up overlapping-but-not-
+identical row sets, build different memos+reference_ids → two real
+broadcasts → publisher double-paid for the overlap. Brief's §6.4
+dismissed this as "acceptable for SQLite scope" but the math doesn't
+work if a `/proof` lands between the two pickers' queries. ~10 lines,
+turned "probably fine" into "actually correct."
+
+**Findings worth keeping:**
+
+- **Polling cadence parameterized.** `wait_for_tx_confirmation` now
+  takes `poll_interval_seconds=1.0` (default unchanged). batch_settler
+  passes 2.0 to halve `getSignatureStatuses` rate when multiple flushes
+  run sequentially — per-method limit is the real constraint on devnet.
+- **`reference_id` is post-broadcast idempotency, not pre-broadcast
+  request idempotency.** Two distinct broadcasts with the same
+  `reference_id` but different tx bytes both land. So idempotency only
+  saves us when the identical tx is rebuilt deterministically (same
+  group, same memo, same amount). Hence the `flushing` claim — without
+  it, `/proof` arrivals between flush-pickers create different groups
+  with different memos.
+- **Hot path collapses dramatically.** `execute_settlement` shrunk
+  from ~150 lines (try/except around build_tx + Privy + wait + γ_extra
+  + compensating UPDATE) to ~50 lines (nonce insert + atomic budget
+  UPDATE + pending row insert). Most of the deleted code moved 1:1
+  into `batch_settler.flush_group`, just at per-batch granularity.
+- **e2e_demo.py needs explicit flush.** Setting `BATCH_ENABLED=false`
+  alone doesn't restore deterministic per-call behavior — `/proof`
+  still writes pending rows because the flag only gates the lifespan
+  loop, not the hot path. Script imports `flush_all` from
+  `services.batch_settler` and calls it after each `/proof` step.
+- **Compensation is per-row, fan-out within one batch.** When Privy
+  refuses to broadcast (simulation fail, e.g. insufficient funds for
+  rent), `_compensate_failed` walks every row in the group, runs the
+  same compensating UPDATE on each campaign (refund spent + flip
+  COMPLETED→ACTIVE if room reopens), then marks all rows `failed` in
+  one statement. Different campaigns in different groups get
+  compensated independently.
+- **Auto-play removes its `privy` parameter threading.** Hot path no
+  longer touches Privy, so `_settle_one`, `_tick`, and
+  `run_auto_play_loop` lost their `privy` arg. PrivyClient instantiation
+  moved entirely into `batch_settler`. Reduces one source of session
+  re-use bugs.
+- **Frontend "queued" treatment is muted, not emphasized.** The user
+  experience goal: pending settlements feel like they're already-done
+  (the play happened the moment /proof returned), with the on-chain
+  bookkeeping as background detail. Pending rows render in `--tx-2`
+  (muted text), confirmed rows in `--sol-teal` with the tx hash link,
+  failed rows in `--st-expired` with "failed". Plays counter ticks at
+  pending-time so the dashboard feels live without waiting for the
+  flush.
+- **`pending_plays` field on CampaignStats.** SQL count of
+  `status IN ('pending','flushing')` rows per campaign. Frontend
+  surfaces as a small "N queued" subtext under the Plays stat when > 0.
+  audit_ledger.py uses the same data to mark IN-FLIGHT (not DRIFT) on
+  campaigns whose on-chain balance is HIGH by exactly the pending
+  total — those settlements are queued, not stuck.
+- **Refund 503 path is the right tradeoff.** If `flush_campaign` can't
+  drain (RPC blind across multiple retries), refund returns 503 with
+  detail and the advertiser retries. Beats either (a) silently
+  proceeding and creating drift or (b) blocking the request thread for
+  minutes until the loop catches up. UI surfaces the 503 via the
+  existing `humanizeError` flow.
+
+**E2E results (2026-04-29):** `scripts/e2e_demo.py` 15/15 on real
+devnet with batching enabled-then-flushed. Notable: budget-exhausted
+test drained the tiny campaign in 2 plays (each `/proof` returned
+fast), then `flush_all()` collapsed both into ONE batch tx
+(`rows=2 amount=0.002000`). Demonstrates the batching mechanism
+end-to-end. Privy retry-on-`transaction_broadcast_failure` (fresh ATA
+RPC lag) still works at batch granularity — typical behavior is one
+or two retries before broadcast succeeds.
 
 ### Session 17 — GCP deployment prep
 
@@ -665,5 +796,58 @@ Filed for BUSINESS-CONSTRAINTS §7 (mainnet blockers) cross-reference.
 - **2026-04-27 (Session 14):** DMA targeting + scheduling shipped. Backend: `services/venues.py` loads `backend/data/venues.json` (gitignored, user-supplied) into an in-memory index — `dma → device_id[]`, `device_id → dma`, `display_counts`, `pick_random_device(labels)`. `DMA_LABELS` map canonicalizes Mongo codes (`ny`/`la`/`sf`/`mia`/`bos`/`aus`) to display labels. `Campaign.target_dmas` (JSON), `start_date`, `end_date` (Date) added; dev-only `_dev_alter_table_for_existing_sqlite()` in `database.py` ALTERs existing tables idempotently so column adds don't force a volume reset. New `routers/markets.py` exposes `GET /api/markets` (Privy-authed). `/bid` now requires `imp.ext.device_id`, resolves DMA via the index, filters FIFO candidates by `target_dmas` + schedule window, and lazy-flips `active`→`expired` for any campaign whose `end_date < today` while iterating. `CampaignStatus.EXPIRED` added; refund accepts it. Auto-play + `simulate-play` enforce the schedule window and pick a random device whose DMA matches the campaign's targeting; auto-play logs include venue name for ops debugging but `SimulatePlayResponse` exposes only `dma` to the dashboard (venue identifies a specific publisher partner — not safe to leak). Frontend: 4-step wizard now (`StepImage` → `StepTargeting` → `StepSchedule` → `StepDetails`); StepTargeting renders the 6 DMA cards with click-to-toggle, live REACH = sum of selected display counts, hardcoded "1 every 5 min" line; StepSchedule has native date inputs with today-min validation. `CampaignCard` shows targeting + schedule in the expanded detail and surfaces the DMA on the last-play indicator. `CreateCampaignRequest` validator rejects unknown DMAs, dups, past start dates, and end before start. Docker volume swap: bind-mount `./backend/data:/app/data` so the venues file is visible inside the container; existing DB preserved via `docker cp`. E2E (`scripts/e2e_demo.py`) updated to send `device_id` from the venues index and create campaigns targeting `San Francisco`; force-disables `AUTO_PLAY_ENABLED` at the top of the file because the lifespan loop ticks during the e2e's bid → proof retry window and double-counts `spent` otherwise. 13/13 on real devnet.
 - **2026-04-27 (Session 12):** Treasury topup helpers shipped. Manual experiment confirmed Circle's per-address rate limit is real (claim into helper + immediate claim into treasury from same browser → both succeeded). New `scripts/bootstrap_helpers.py` creates N Privy server wallets and treasury-seeds each with 0.01 SOL via `build_sol_transfer_tx` + `wait_for_tx_confirmation` (the RPC-airdrop path silently fails the same way it does for campaign wallets, so we don't even try). New `scripts/sweep_helpers.py` reads zipped `HELPER_WALLET_IDS` / `HELPER_WALLET_ADDRESSES`, sweeps any non-zero helper to treasury, plus `--wallet-id` + `--wallet-address` rescue mode for one-offs. Used the rescue mode to recover 20 USDC from the throwaway helper created by `create_helper_wallet.py` during the manual probe. End-to-end verified: 4 helpers (3 bootstrap + 1 rescued) → 4 × Circle web-faucet claims → one `sweep_helpers.py` run consolidated 80 USDC to treasury with 4 Solscan tx hashes. **Reference-id length gotcha**: Privy's 64-char cap meant the first sweep failed with `invalid_data` — full uuid4 string suffix was 68 chars. Codebase convention is `uuid4().hex[:8]`, kept that in both new scripts. RUNBOOK has the daily-routine click sequence + rescue command.
 - **2026-04-28 (validation pass):** Post-Session-16.7 hygiene reset + clean simulation. Wrote two new ops scripts: `scripts/audit_ledger.py` (read-only reconciliation, three sections — publisher / campaign-wallet / service-wallet — with SHORT/DRIFT/MORE/OK flags and a tolerance-aware comparison) and `scripts/sweep_to_treasury.py` (drains every owned Privy server wallet to treasury with a USDC-then-SOL ordering, gas-seed pre-pass for wallets that have USDC but zero SOL, dry-run by default). **Forensic finding:** the one DRIFT row in the initial audit (refunded campaign `2fc2e504` with 0.031 USDC stranded on-chain) was traced to pre-Session-16.5 settlement-tx-bytes dedup. Decoded the campaign's refund tx via `get_transaction(jsonParsed)` + pre/post token balance deltas: refund correctly sent `budget - spent = 2.8305` per the DB; campaign wallet held 2.8615 going in (because 62 of the 99 "confirmed" /proof settlements had been collapsed by Solana network dedup before the memo fix shipped at 18:16 the same day the campaign ran). Math reconciled exactly (62 × 0.0005 = 0.031). Same-shape leak as BACKEND-REVIEW.md §1.1, different root cause; current refund code has the §1.1 property but not the dedup property (memo fix landed 16.5). **Hygiene reset executed:** stopped backend → swept 12.82 USDC + 5.48 SOL across 51 campaign wallets + 4 helpers + protocol-revenue + demo-publisher → wiped `backend/data/adserver.db` → restart → audit returned empty (zero campaigns, zero settlements, treasury holds the consolidated funds). **Controlled simulation:** funded 3 campaigns through the wizard targeting different DMAs, paused after auto-play accumulated 844 plays / 0.4220 USDC across them. Audit returned **zero DRIFT, zero SHORT** on every reconciliation — publisher's 844 plays = 0.422000 USDC matched on-chain to the microUSDC, all 3 paused campaigns matched their `budget - spent` exactly, protocol revenue = 0.765000 USDC = 30.6 × 2.5% bit-perfect. **Refund flow validated:** refunded the meatiest paused campaign (`a8960943`, 17.0525 USDC remaining); on-chain ended at 0.0000, no leak, other 2 campaigns unaffected. Atomic UPDATE + memo fix from Session 16.5 confirmed correct under real concurrent load. Two new RUNBOOK sections document the audit + reset routines including a forensic recipe for tx-level investigation. Two small frontend polish bugs found and fixed during the session: leaflet z-index bleed above wizard modal (added `isolation: isolate` on `.x-map`, bumped Modal `zIndex` 100 → 1000), and the live activity map's integer-zoom-snap leaving big empty space around tight DMA bounds (`zoomSnap={0.25}` + tighter padding + `maxZoom={7}`). Also a UX nit: relocated the protocol-fee tx Solscan link from a standalone block under the map to a sub-link under the Protocol fee stat itself, and added a campaign-wallet Solscan link under the Remaining stat.
+- **2026-04-29 (Session 16.8):** Batch settlement shipped, closing PLAN
+  Session 16.6 (RPC-rate-limit drift) and unblocking Session 17 GCP
+  deploy. Architecture change: `/proof` (and simulate-play, auto-play)
+  no longer broadcast on-chain — they write a `pending` Settlement row
+  via the existing atomic budget UPDATE and return sub-100ms.
+  Background loop in new `app/services/batch_settler.py` flushes
+  pending rows every 5s, grouping by `(campaign, publisher_wallet)`
+  and emitting one Solana USDC transfer per group. The α + γ_safe +
+  γ_extra logic from Session 16.6's iteration (wait_for_tx_confirmation
+  + late-landing get_signature_status check) was preserved as the
+  foundation but moved 1:1 into `batch_settler.flush_group` at
+  per-batch granularity instead of per-play. Critical correctness
+  rule: on RPC blindness (γ_extra returns None because
+  getSignatureStatuses 429s), rows go back to PENDING for the next
+  loop tick — **never compensate on uncertainty.** Compensation only
+  fires on definitive failures (Privy raised pre-broadcast, e.g.
+  simulation fail). New `flushing` intermediate status added beyond
+  what the brief specified: `_claim_pending` runs an atomic UPDATE
+  flipping pending → flushing before processing, closing a race where
+  refund's `flush_campaign` and the loop's `flush_all` could
+  double-pay overlapping row sets (different memos + different
+  reference_ids → two real broadcasts even with Privy's idempotency).
+  `wait_for_tx_confirmation` got a `poll_interval_seconds` parameter;
+  batch_settler passes 2.0 to halve the per-method RPC rate to ~1.5
+  req/s with 3 active campaigns — well under devnet's 4 req/s/method.
+  **Decided to skip private RPC switch:** the architecture's pressure
+  scales with O(active campaigns) instead of O(plays/sec), and
+  rate-limit blindness now self-heals (leave pending → retry) instead
+  of producing drift. **Refund flushes pending first** (`flush_campaign`
+  synchronously) before computing `remaining`; if pending can't drain
+  the handler returns 503 and the advertiser retries — beats either
+  silently proceeding (drift) or blocking minutes (poor UX).
+  **Schema/UI:** `Settlement.status` enum gains `pending` + `flushing`
+  values (no DB migration; status is a free-form String). `ProofResponse`
+  + `SimulatePlayResponse` now have optional `tx_hash` and a
+  `settlement_id` field for client-side polling. `CampaignStats` gains
+  `pending_plays`. Frontend renders pending rows in muted color with
+  "queued" instead of tx hash; "Plays" stat shows "N queued" subtext;
+  activity feed (Overview + per-card) gets the same status pill
+  treatment. Plays counters now count `pending + confirmed` so the
+  dashboard ticks at /proof time (the play happened the moment it
+  returned), not at flush time. `total_confirmed_usdc` stays
+  confirmed-only (money actually moved). audit_ledger.py adds a
+  per-campaign pending count column and marks IN-FLIGHT (not DRIFT)
+  for campaigns whose on-chain balance is HIGH by exactly the pending
+  total. New `scripts/cleanup_drift_reverse.py` (publisher → campaigns
+  split) cleaned the 0.0055 USDC drift from the failed α + γ
+  iteration before new code processed anything. **E2E (`e2e_demo.py`)
+  → 15/15** on real devnet: budget-exhausted test drained 2 plays,
+  then `flush_all()` collapsed both into ONE batch tx (the batching
+  mechanism observably working). 30-min soak test pending — user
+  running it in real time to validate concurrency + RPC pressure
+  characteristics.
 - **2026-04-28 (Session 16.7):** Per-campaign live activity map shipped. Backend: BACKEND-REVIEW.md §1.6 cleanup landed first — `routers/campaigns.campaign_stats` no longer fetches every confirmed settlement to compute `total_plays` + `total_confirmed_usdc`; one SQL `func.count` + `func.coalesce(func.sum(...), 0)` query replaces it. New `plays_by_dma: dict[str, int]` aggregate via SQL `GROUP BY device_id` resolved through the venues index — lifetime totals (no time cutoff so the count never tweens down), NULL device_ids excluded, unmapped device_ids bucket as `"Unknown"`. Schema field added to `CampaignStats`. E2E (`scripts/e2e_demo.py`) → 13/13 on real devnet both before and after the schema add (sequencing per PLAN: SQL cleanup → e2e → plays_by_dma → e2e → frontend). Frontend: `react-leaflet@^4.2.1` + `leaflet@^1.9.4` + `@types/leaflet@^1.9.12` (frontend image rebuilt with `--renew-anon-volumes` per the dep-bump ritual). New `lib/dmaCentroids.ts` (hardcoded city-level lat/lon for the 6 DMAs), `lib/useCountUp.ts` (rAF + ease-out cubic, 1000 ms default — 600 was too short), `components/LiveActivityMap.tsx` (Carto Dark Matter tiles, fully non-interactive, `FitOnMount` child uses `useMap()` + `fitBounds`), `tokens.css` `.x-map*` styles. Embedded inside the expanded `CampaignCard` between the targeting/last-play row and the recent settlements table. **Punch animation** (added late-session per user feedback that the count-up was "weak"): scale 1 → 1.28 → 1 with `cubic-bezier(0.34, 1.56, 0.64, 1)` over 550 ms + brief glow boost, triggered only when the _server_ count changes (not on every tween frame). Required architectural rethink: divIcon HTML rebuilds on every `useCountUp` frame would reset CSS animations ~60×/s; fixed by keying `useMemo` on `dma` only (not `display`), then updating count text and toggling the punch class imperatively on the marker's DOM via `markerRef.current?.getElement()` with a forced reflow (`void inner.offsetWidth`) so the animation restarts cleanly. Pattern reusable for any future leaflet divIcon work — captured in Session 16.7 findings. Pre-existing dead `StatusBadge` import in `pages/Campaigns.tsx` removed (was blocking `tsc -b --noEmit`). Browser walk on a real campaign confirmed pins render at city-level on targeted DMAs, auto-play deltas produce one punch per affected DMA in sync with the activity feed flash. tsc clean.
 - **2026-04-27 (Session 16):** Frontend facelift + Session 16.5 perf/correctness pass. Design package in `/design/` ported into the live React app: `tokens.css` + `components/ui/` primitives + `AppHeader`/`TabRow`/`WalletChip` shell + `pages/Overview.tsx` + `pages/Campaigns.tsx` + `components/wizard/Modal.tsx` + 5 restyled steps + funding-progress + success state with two Solscan links + "Done → Campaigns auto-expand" navigation. Old `WalletPanel`/`CampaignsPanel`/`Home.tsx`/legacy `styles.css` classes deleted. `tsc --noEmit` clean. Mid-session expansions: (1) **`GET /api/dashboard-summary`** new aggregate endpoint replaced Overview's N-fan-out per-campaign /stats polling — 2 req/5s regardless of campaign count. (2) **PLAN must-fix #2 closed** — `execute_settlement` now does atomic `UPDATE ... SET spent=spent+:amt WHERE budget-spent+1e-9>=:amt`; concurrent calls cannot both pass. (3) **Compensating refund** on Privy failure decrements spent + un-completes status if our forward UPDATE flipped it. (4) **Memo on USDC transfers** — concurrent settlements with identical (from, to, amount) within one blockhash window were collapsed by Solana network dedup to a single on-chain tx. SPL Memo v2 program ID is case-sensitive (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` — uppercase X), caught the typo against devnet. (5) **Multi-play auto-play** — `random.randint(min, max)` settlements concurrently per tick (`AUTO_PLAY_PLAYS_PER_TICK_MIN`/`_MAX` settings), each on its own DB session. SQLAlchemy connection pool bumped to size=30 / overflow=60 / timeout=60 since defaults (5+10) starved within one burst — every settlement holds a session through its ~5-10s Privy await. (6) **device_id end-to-end** — added optional field on `ProofContextClaims`; `/bid` extracts from `imp.ext.device_id` and threads through the JWT; `/proof` + simulate-play + auto-play persist on new nullable `Settlement.device_id` column (dev SQLite ALTER carries it); `SettlementSummary`/`DashboardActivityRow` resolve `device_id → dma` server-side via venues index. Dashboard's "Last play" + Overview's activity feed show DMA. Publisher integration unchanged — JWT is opaque, schema identical. (7) **`last_24h_plays` field** on `CampaignStats` — was previously derived from server-capped `recent_settlements` so the counter plateaued at ~30-40 once each campaign had ≥10 plays/24h. Now a real COUNT(\*). (8) **UTC timezone fix** — SQLite drops tzinfo on read; `_to_settlement_summary` now stamps `tzinfo=timezone.utc` before `isoformat()`, otherwise browser parses as local and rows look "3h ago" the moment they're created. (9) **Date-picker fix** in `StepSchedule` — the layered `opacity:0` native input pattern doesn't trigger Chrome's picker; replaced with `<button>` + `inputRef.current.showPicker()`. (10) **Row-flash animation** on Recent Activity (`.x-row-flash` keyframe + `useFlashOnArrival(ids)` hook). E2E (`scripts/e2e_demo.py`) → 13/13 with `docker compose stop backend` first (auto-play burst is now even more disruptive than before).

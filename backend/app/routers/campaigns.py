@@ -25,11 +25,13 @@ from ..schemas import (
     SimulatePlayResponse,
 )
 from ..services import x402 as x402_service
-from ..services.calc import CalcError, compute_quote
+from ..services.calc import CalcError, compute_quote, required_sol_seed_lamports
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
 from ..services.solana import (
     build_campaign_bootstrap_tx,
+    build_sol_transfer_tx,
     build_usdc_transfer_tx,
+    get_sol_lamports,
     wait_for_tx_confirmation,
 )
 from ..services.tokens import ProofContextClaims
@@ -37,11 +39,6 @@ from ..services.venues import get_venues_index
 from .proof import execute_settlement
 
 logger = logging.getLogger(__name__)
-
-# Fresh Privy server wallets start with 0 SOL; devnet RPC airdrops are
-# rate-limited and unreliable. We transfer a small amount from the treasury
-# so the campaign wallet can pay its own tx fees for /proof and refund.
-CAMPAIGN_WALLET_SOL_SEED_LAMPORTS = 10_000_000  # 0.01 SOL, ~2000 default-fee txs
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
@@ -194,11 +191,17 @@ async def create_campaign(
         # can pay its own fees on /proof + refund) AND create its USDC ATA
         # (the x402-solana client refuses to build its transfer tx unless the
         # destination's ATA already exists). Must confirm before returning 402.
+        #
+        # SOL seed is right-sized to the campaign's expected play count (see
+        # services/calc.required_sol_seed_lamports). A campaign that runs
+        # auto-play to completion drains all of this seeded SOL into validator
+        # fees; partial-play refunds are swept back to treasury at refund time.
+        seed_lamports = required_sol_seed_lamports(quote.total_plays)
         try:
             bootstrap_tx_b64 = await build_campaign_bootstrap_tx(
                 funder_address=settings.treasury_wallet_address,
                 beneficiary_address=wallet["address"],
-                lamports=CAMPAIGN_WALLET_SOL_SEED_LAMPORTS,
+                lamports=seed_lamports,
             )
             bootstrap_sig = await privy.sign_and_send_solana(
                 wallet_id=settings.treasury_wallet_id,
@@ -417,13 +420,46 @@ def campaign_stats(
 ) -> CampaignStats:
     c = _owned_campaign(db, campaign_id, advertiser)
 
-    total_plays, total_confirmed_usdc = db.query(
-        func.count(Settlement.id),
-        func.coalesce(func.sum(Settlement.amount_usdc), 0),
-    ).filter(
-        Settlement.campaign_id == c.id,
-        Settlement.status == SettlementStatus.CONFIRMED.value,
-    ).one()
+    # Session 16.8: count pending + confirmed for play-counting purposes
+    # (the play happened the moment /proof returned; settlement state is an
+    # implementation detail). USDC totals stay confirmed-only — that's
+    # money-actually-moved-on-chain, not money-owed.
+    counted_statuses = (
+        SettlementStatus.PENDING.value,
+        SettlementStatus.CONFIRMED.value,
+    )
+    total_plays = (
+        db.query(func.count(Settlement.id))
+        .filter(
+            Settlement.campaign_id == c.id,
+            Settlement.status.in_(counted_statuses),
+        )
+        .scalar()
+        or 0
+    )
+    total_confirmed_usdc = (
+        db.query(func.coalesce(func.sum(Settlement.amount_usdc), 0))
+        .filter(
+            Settlement.campaign_id == c.id,
+            Settlement.status == SettlementStatus.CONFIRMED.value,
+        )
+        .scalar()
+        or 0
+    )
+    pending_plays = (
+        db.query(func.count(Settlement.id))
+        .filter(
+            Settlement.campaign_id == c.id,
+            Settlement.status.in_(
+                (
+                    SettlementStatus.PENDING.value,
+                    SettlementStatus.FLUSHING.value,
+                )
+            ),
+        )
+        .scalar()
+        or 0
+    )
 
     recent = (
         db.query(Settlement)
@@ -439,7 +475,7 @@ def campaign_stats(
         db.query(Settlement)
         .filter(
             Settlement.campaign_id == c.id,
-            Settlement.status == SettlementStatus.CONFIRMED.value,
+            Settlement.status.in_(counted_statuses),
             Settlement.created_at >= cutoff_24h,
         )
         .count()
@@ -448,12 +484,13 @@ def campaign_stats(
     # Lifetime per-DMA play counts. Drives the live activity map's per-marker
     # tween. NULL device_id rows (legacy + auto-play before Session 16.5) are
     # dropped by the GROUP BY same as before; devices no longer in the venues
-    # file resolve to None and bucket under "Unknown".
+    # file resolve to None and bucket under "Unknown". Counts pending +
+    # confirmed so the map ticks at /proof time, not at flush time.
     by_device = (
         db.query(Settlement.device_id, func.count(Settlement.id))
         .filter(
             Settlement.campaign_id == c.id,
-            Settlement.status == SettlementStatus.CONFIRMED.value,
+            Settlement.status.in_(counted_statuses),
             Settlement.device_id.isnot(None),
         )
         .group_by(Settlement.device_id)
@@ -471,8 +508,9 @@ def campaign_stats(
         budget=float(c.budget),
         spent=float(c.spent),
         remaining_budget=float(c.budget) - float(c.spent),
-        total_plays=total_plays,
+        total_plays=int(total_plays),
         last_24h_plays=last_24h_plays,
+        pending_plays=int(pending_plays),
         total_confirmed_usdc=float(total_confirmed_usdc),
         cpm_price=float(c.cpm_price),
         target_dmas=c.target_dmas,
@@ -572,6 +610,32 @@ async def refund_campaign(
             detail=f"pause the campaign before refunding (current: {c.status})",
         )
 
+    # Session 16.8: drain any pending settlements for this campaign before
+    # computing the refund amount. `spent` already reflects them (the /proof
+    # atomic UPDATE reserves budget at queue time), but the on-chain USDC
+    # they're owed is still sitting in the campaign wallet. If we refunded
+    # without flushing first, the pending batch tx would later try to pay
+    # the publisher from a wallet whose USDC just walked back to the
+    # advertiser → tx fails on insufficient balance, drift forms.
+    #
+    # If the flush itself can't make progress (RPC blind), bail with 503;
+    # the advertiser retries shortly and the next batch loop will catch up.
+    from ..services.batch_settler import flush_campaign as _flush_campaign
+
+    flush_result = await _flush_campaign(c.id, privy=privy)
+    if flush_result.left_pending_rows > 0 or flush_result.failures:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"pending settlements not yet flushed "
+                f"(pending={flush_result.left_pending_rows}, "
+                f"failures={len(flush_result.failures)}); retry refund shortly"
+            ),
+        )
+
+    # Re-load post-flush so `spent` reflects everything paid out.
+    db.refresh(c)
+
     remaining = float(c.budget) - float(c.spent)
     if remaining <= 0:
         c.status = CampaignStatus.REFUNDED.value
@@ -584,6 +648,7 @@ async def refund_campaign(
             detail="advertiser_wallet missing on campaign — cannot refund",
         )
 
+    settings = get_settings()
     try:
         tx_b64 = await build_usdc_transfer_tx(
             from_address=c.wallet_address,
@@ -603,6 +668,40 @@ async def refund_campaign(
     c.refund_tx_hash = tx_hash
     db.commit()
 
+    # Best-effort SOL sweep back to treasury. The campaign wallet was
+    # right-sized at creation (services/calc.required_sol_seed_lamports);
+    # whatever didn't get burned on validator fees over the campaign's
+    # life should return to treasury rather than sit stranded forever
+    # (Privy doesn't support wallet deletion).
+    if settings.treasury_wallet_address:
+        try:
+            await wait_for_tx_confirmation(tx_hash, timeout_seconds=30.0)
+            sol_lamports = await get_sol_lamports(c.wallet_address)
+            sweep_lamports = max(0, sol_lamports - 10_000)  # leave 2 fees worth
+            if sweep_lamports > 0:
+                sol_tx_b64 = await build_sol_transfer_tx(
+                    from_address=c.wallet_address,
+                    to_address=settings.treasury_wallet_address,
+                    lamports=sweep_lamports,
+                )
+                sol_sweep_hash = await privy.sign_and_send_solana(
+                    wallet_id=c.wallet_id,
+                    transaction_base64=sol_tx_b64,
+                    reference_id=f"refund-sol-{c.id}",
+                )
+                logger.info(
+                    "refund SOL sweep campaign=%s lamports=%d tx=%s",
+                    c.id,
+                    sweep_lamports,
+                    sol_sweep_hash,
+                )
+        except Exception:  # noqa: BLE001 — non-blocking, just log
+            logger.exception(
+                "refund SOL sweep failed (non-blocking) campaign=%s wallet=%s",
+                c.id,
+                c.wallet_id,
+            )
+
     return RefundResponse(
         refund_amount=remaining,
         tx_hash=tx_hash,
@@ -614,7 +713,6 @@ async def refund_campaign(
 async def simulate_play(
     campaign_id: str,
     advertiser: AdvertiserIdentity = Depends(require_advertiser),
-    privy: PrivyClient = Depends(get_privy_client),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ) -> SimulatePlayResponse:
@@ -670,11 +768,16 @@ async def simulate_play(
         device_id=device["device_id"],
     )
 
-    tx_hash = await execute_settlement(claims, db, privy)
+    # Session 16.8: queue-only. tx_hash is None at this point — the
+    # batch_settler emits the actual on-chain transfer within
+    # BATCH_FLUSH_INTERVAL_SECONDS. UI shows the row as "queued" until then.
+    row = await execute_settlement(claims, db)
     return SimulatePlayResponse(
         amount_usdc=amount,
-        tx_hash=tx_hash,
-        solscan_url=_solscan_tx_url(tx_hash) or "",
+        tx_hash=None,
+        solscan_url=None,
         publisher_wallet=settings.demo_publisher_wallet,
         dma=device["dma"],
+        settlement_id=row.id,
+        status=row.status,
     )

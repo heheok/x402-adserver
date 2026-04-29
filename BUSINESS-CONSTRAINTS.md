@@ -96,16 +96,31 @@ Things we can't negotiate because they live in vendor policy.
 - **No SLA commitments from Privy.** Availability is their problem; we have
   no contractual guarantees.
 - **`reference_id` is NOT strict pre-broadcast idempotency (verified
-  2026-04-22).** Passing the same `reference_id` twice does not prevent the
-  second tx from being broadcast on chain — Privy broadcasts, *then* rejects
-  the duplicate at record time with `invalid_data` "reference_id already
-  exists". Implication: retrying a failed `signAndSendTransaction` with the
-  same `reference_id` can produce a **real duplicate on-chain transfer**, not
-  a safe idempotent replay. Our current retry loop in
-  `services/privy.sign_and_send_solana` is narrow enough (only retries on
-  `transaction_broadcast_failure`, which means Privy explicitly told us the
-  broadcast did not happen) that it should be safe, but this assumption
-  must be re-verified before mainnet — see §7.
+  2026-04-22, re-confirmed in production 2026-04-29).** Passing the same
+  `reference_id` twice does not prevent the second tx from being broadcast
+  on chain — Privy broadcasts, *then* rejects the duplicate at record time
+  with `invalid_data` "reference_id already exists". Implication: retrying
+  a failed `signAndSendTransaction` with the same `reference_id` can produce
+  a **real duplicate on-chain transfer**, not a safe idempotent replay.
+  Our current retry loop in `services/privy.sign_and_send_solana` is narrow
+  enough (only retries on `transaction_broadcast_failure`, which means
+  Privy explicitly told us the broadcast did not happen) that it should be
+  safe, but this assumption must be re-verified before mainnet — see §7.
+
+  **2026-04-29 production confirmation.** Session 16.8's `batch_settler`
+  initially used a deterministic `reference_id = f"batch-{campaign[:8]}-{first_nonce[:8]}"`
+  for restart-safety. Auto-play nonces are `f"auto-{32 hex}"`, so
+  `first_nonce[:8]` = `"auto-"` + 3 hex chars = only 4096 unique values.
+  After ~64 batches per campaign, birthday collisions made same-prefix
+  ref_ids near-certain. Privy returned 400 `"already exists"` on collisions,
+  but **the colliding tx had already broadcast and paid the publisher** —
+  exactly as §3 predicts. Our compensation path then marked rows FAILED
+  and decremented `spent`, creating publisher-MORE / campaign-DRIFT in
+  the same shape as Session 16.6's RPC-blindness bug. Lesson: the §3
+  rule "use unique suffixes per call" applies to ALL Privy ref_ids, not
+  just retries. Fix shipped in Session 16.8 uses the full nonce, plus
+  treats 5xx + "already exists" 400 as post-broadcast-uncertain (leave
+  pending instead of compensating).
 
 ### x402 protocol — facilitator
 - We use `https://x402.org/facilitator` (free, no API keys) for the advertiser

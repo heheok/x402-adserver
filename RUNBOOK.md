@@ -289,6 +289,106 @@ still failing — pipe that into cron/automation if you want.
 
 ---
 
+## Batch settlement (Session 16.8)
+
+`/proof`, simulate-play, and auto-play don't broadcast on-chain anymore —
+they write a `pending` row to `settlements` and return sub-100ms. A
+background loop in `app/services/batch_settler.py` flushes pending rows
+every `BATCH_FLUSH_INTERVAL_SECONDS`, grouping by `(campaign_id,
+publisher_wallet)` and emitting **one Solana tx per group**. Replaces
+the per-play settlement model that was fragile under devnet RPC rate
+limits.
+
+### Settings (backend/.env)
+```
+BATCH_ENABLED=true
+BATCH_FLUSH_INTERVAL_SECONDS=5
+BATCH_MAX_ROWS_PER_FLUSH=100
+```
+Recreate the container to pick up env changes (env_file gotcha at the top
+of this doc).
+
+### State machine
+```
+pending  ─── batcher claims ───▶  flushing  ─── tx confirms ──▶  confirmed
+                                     │
+                                     ├── RPC blind ──▶ pending (next loop retries)
+                                     │
+                                     └── Privy refused ──▶ failed (compensating UPDATE)
+```
+
+`pending` carries a reserved budget (the `/proof` atomic UPDATE moved
+`spent` at queue time). Compensation at definitive failure decrements
+`spent` back; replay protection holds because the nonce stays consumed.
+
+### Monitor pending count
+```bash
+docker compose exec backend sqlite3 /app/data/adserver.db \
+  "SELECT status, COUNT(*) FROM settlements GROUP BY status;"
+```
+Or via the audit:
+```bash
+docker compose run --rm backend python scripts/audit_ledger.py
+# Per-campaign 'pending' column shows N/sum(amount); IN-FLIGHT flag
+# replaces DRIFT for campaigns with pending settlements that haven't
+# transferred yet.
+```
+
+### Watch the loop live
+```bash
+docker compose logs -f backend | grep "batch settler\|batch flush"
+```
+Per-tick log line: `batch settler tick — confirmed=N failed=M left_pending=K`.
+Per-group log lines: `batch flush confirmed campaign=… rows=N tx=…` or
+`batch flush RPC-blind, leaving pending` (transient — next loop retries).
+
+### Manually trigger a flush
+```bash
+docker compose exec backend python -c \
+  "import asyncio; from app.services.batch_settler import flush_all; \
+   r = asyncio.run(flush_all()); print(r)"
+```
+Returns a `FlushResult` with confirmed/failed/left_pending counts. Useful
+when ops needs to drain everything before stopping the backend.
+
+### Disable batching (E2E testing)
+```bash
+# In .env
+BATCH_ENABLED=false
+```
+The lifespan loop no longer starts. `/proof` still writes pending rows;
+callers must manually call `flush_all()` to settle. `scripts/e2e_demo.py`
+sets this in `os.environ` at script start and inserts a `flush_all()`
+call after each `/proof` step.
+
+### Flush-on-refund property
+`refund_campaign` synchronously calls `flush_campaign(id)` before
+computing `remaining = budget - spent`. If pending rows can't be
+flushed (RPC blind across multiple retries), refund returns 503 and
+the advertiser retries shortly. **Never proceed with refund while
+pending rows exist** — that would refund USDC the publishers are
+still owed.
+
+### Restart resilience
+Pending and flushing rows survive `docker compose restart backend`. On
+boot the batcher loop picks them up next tick. Deterministic
+`reference_id` per group (`batch-{campaign[:8]}-{first_nonce[:8]}`)
+makes the re-broadcast idempotent at the Privy layer — same tx hash
+returned, no double-broadcast.
+
+### Tuning
+- **5s interval** is the demo default. Production probably wants 30–60s
+  to amortize RPC pressure over fewer batches.
+- **2s polling** inside `wait_for_tx_confirmation` (configured in
+  batch_settler) keeps `getSignatureStatuses` under devnet's 4 req/s/method
+  limit even with 4–5 concurrent flushes. Don't drop below 1s without
+  switching to a private RPC.
+- **Sequential flush** within a tick (not parallel). Keeps RPC pressure
+  flat. At hackathon scale (≤10 active campaigns) the wall-clock cost is
+  bounded; large fleets would parallelize with rate-limit gating.
+
+---
+
 ## Auto-play (demo-only)
 
 Server-side background loop that fires `random.randint(MIN, MAX)` plays

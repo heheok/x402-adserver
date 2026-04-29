@@ -93,8 +93,13 @@ class CampaignStats(BaseModel):
     budget: float
     spent: float
     remaining_budget: float
+    # Session 16.8: total_plays + last_24h_plays count pending + confirmed
+    # (plays that happened, regardless of on-chain settlement state).
+    # pending_plays surfaces the unflushed batch as a "N queued" indicator.
+    # total_confirmed_usdc stays confirmed-only — money actually moved.
     total_plays: int
     last_24h_plays: int = 0
+    pending_plays: int = 0
     total_confirmed_usdc: float
     cpm_price: float
     target_dmas: list[str] | None = None
@@ -144,13 +149,19 @@ class DashboardSummary(BaseModel):
 
 class SimulatePlayResponse(BaseModel):
     amount_usdc: float
-    tx_hash: str
-    solscan_url: str
+    # Session 16.8: tx_hash + solscan_url are populated once the batch
+    # settler flushes the pending row (within BATCH_FLUSH_INTERVAL_SECONDS).
+    # On the immediate response they're null and status="pending"; client
+    # discovers the on-chain hash via /api/campaigns/:id/stats polling.
+    tx_hash: str | None = None
+    solscan_url: str | None = None
     publisher_wallet: str
     # DMA-only on purpose: venue name identifies a specific publisher partner
     # and isn't something we want to leak to advertisers via the API. Server-
     # side logs (auto-play) still include the venue for ops debugging.
     dma: str | None = None
+    settlement_id: str | None = None
+    status: str = "pending"
 
 
 class MarketInfo(BaseModel):
@@ -214,5 +225,10 @@ class ProofRequest(BaseModel):
 
 
 class ProofResponse(BaseModel):
+    # Session 16.8: status starts as "pending" — the background batch
+    # settler emits the on-chain tx within ~5s. tx_hash is None until then.
+    # settlement_id lets clients poll /api/campaigns/:id/settlements (or the
+    # row directly) to observe the pending → confirmed transition.
     status: str
     tx_hash: str | None = None
+    settlement_id: str | None = None

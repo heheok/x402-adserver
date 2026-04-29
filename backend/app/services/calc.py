@@ -35,6 +35,25 @@ class CalcError(ValueError):
     pass
 
 
+# Right-sized SOL seed for new campaign wallets. We know `total_plays` at
+# creation time from compute_quote(), so seed exactly enough SOL for every
+# settlement the campaign can fund + a small reserve for the refund tx +
+# protocol fee tx + buffer. Eliminates the SOL-drain bug that bit
+# campaigns provisioned before this change (see PLAN.md Session 16.6).
+#
+# Per-tx fee on Solana devnet is 5_000 lamports per signature. We add a
+# 1_000-lamport buffer per play to absorb compute-budget overhead and any
+# minor fee bumps. Reserve covers refund tx + protocol fee tx + dust.
+SOL_PER_PLAY_LAMPORTS = 6_000
+SOL_BASE_RESERVE_LAMPORTS = 50_000
+
+
+def required_sol_seed_lamports(total_plays: int) -> int:
+    """Lamports the campaign wallet needs to fund every settlement + admin tx
+    over its lifetime. Treasury sends this amount during campaign bootstrap."""
+    return total_plays * SOL_PER_PLAY_LAMPORTS + SOL_BASE_RESERVE_LAMPORTS
+
+
 def compute_quote(
     target_dmas: list[str],
     start_date: date,

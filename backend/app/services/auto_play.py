@@ -26,7 +26,6 @@ from fastapi import HTTPException
 from ..config import get_settings
 from ..database import SessionLocal
 from ..models import Campaign, CampaignStatus
-from ..services.privy import PrivyClient
 from ..services.tokens import ProofContextClaims
 from ..services.venues import get_venues_index
 
@@ -41,15 +40,18 @@ _EligibleSnapshot = tuple[str, float, tuple[str, ...]]
 
 
 async def _settle_one(
-    privy: PrivyClient,
     campaign_id: str,
     cpm_price: float,
     device: dict[str, str],
     demo_publisher: str,
 ) -> None:
-    """Run one settlement on its own DB session. Failures are logged at info
+    """Queue one settlement on its own DB session. Failures are logged at info
     level — typical between eligibility check and settle is a drained or
-    freshly-paused campaign, which we don't want spamming exception logs."""
+    freshly-paused campaign, which we don't want spamming exception logs.
+
+    Session 16.8: this used to broadcast on-chain. Now it just writes a
+    pending Settlement row; the batch_settler loop emits the actual tx.
+    """
     # Local import to avoid a circular at module load time.
     from ..routers.proof import execute_settlement
 
@@ -66,15 +68,15 @@ async def _settle_one(
             device_id=device["device_id"],
         )
         try:
-            tx_hash = await execute_settlement(claims, db, privy)
+            row = await execute_settlement(claims, db)
             logger.info(
-                "auto-play: campaign=%s amount=%s device=%s venue=%r dma=%s tx=%s",
+                "auto-play queued: campaign=%s amount=%s device=%s venue=%r dma=%s settlement=%s",
                 campaign_id,
                 amount,
                 device["device_id"],
                 device["venue_name"],
                 device["dma"],
-                tx_hash[:16] + "…",
+                row.id[:8],
             )
         except HTTPException as e:
             logger.info(
@@ -87,7 +89,7 @@ async def _settle_one(
         db.close()
 
 
-async def _tick(privy: PrivyClient) -> None:
+async def _tick() -> None:
     """Run one iteration: build the eligibility snapshot once, then fire a
     random number of settlements concurrently — uniformly sampled from
     [min, max]. Sampling is with replacement so multiple plays can land on
@@ -141,7 +143,6 @@ async def _tick(privy: PrivyClient) -> None:
             continue
         tasks.append(
             _settle_one(
-                privy,
                 campaign_id,
                 cpm,
                 device,
@@ -167,13 +168,12 @@ async def run_auto_play_loop(stop_event: asyncio.Event) -> None:
         logger.info("auto-play disabled (AUTO_PLAY_ENABLED=false)")
         return
 
-    privy = PrivyClient()
     interval = max(1, int(settings.auto_play_interval_seconds))
     logger.info("auto-play loop starting — interval=%ds", interval)
 
     while not stop_event.is_set():
         try:
-            await _tick(privy)
+            await _tick()
         except Exception:
             logger.exception("auto-play iteration crashed; continuing")
 

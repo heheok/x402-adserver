@@ -191,8 +191,59 @@ async def build_campaign_bootstrap_tx(
     return base64.b64encode(bytes(tx)).decode()
 
 
+async def get_sol_lamports(address: str) -> int:
+    """Read native SOL balance for any address. Returns 0 on RPC error
+    (matches `get_usdc_balance`'s defensive shape — the read shouldn't
+    fail-fast since callers usually use it for sanity checks)."""
+    settings = get_settings()
+    try:
+        async with AsyncClient(settings.solana_rpc_url) as c:
+            resp = await c.get_balance(Pubkey.from_string(address))
+        return int(resp.value or 0)
+    except Exception:
+        return 0
+
+
+async def get_signature_status(signature: str) -> str | None:
+    """One-shot status check for a tx signature, no polling.
+
+    Returns one of: "processed", "confirmed", "finalized", or None if the
+    signature isn't visible on-chain. Use this to make a final decision
+    after `wait_for_tx_confirmation` times out: if status reached at least
+    "processed", the tx is in a block (very likely to confirm) — callers
+    should NOT compensate, to avoid the timeout-race double-spend window
+    described in PLAN.md Session 16.6 findings.
+
+    Returns None on transient RPC errors (treat as "definitively dead" only
+    after a sufficient wait past blockhash expiry).
+    """
+    settings = get_settings()
+    try:
+        sig = Signature.from_string(signature)
+    except Exception:
+        return None
+    try:
+        async with AsyncClient(settings.solana_rpc_url) as c:
+            resp = await c.get_signature_statuses(
+                [sig], search_transaction_history=True
+            )
+    except Exception:
+        return None
+    value = getattr(resp, "value", None) or []
+    s = value[0] if value else None
+    if s is None or s.confirmation_status is None:
+        return None
+    name = str(s.confirmation_status).lower()
+    for level in ("finalized", "confirmed", "processed"):
+        if level in name:
+            return level
+    return None
+
+
 async def wait_for_tx_confirmation(
-    signature: str, timeout_seconds: float = 30.0
+    signature: str,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 1.0,
 ) -> bool:
     """Poll getSignatureStatuses until confirmed/finalized or timeout.
 
@@ -200,6 +251,11 @@ async def wait_for_tx_confirmation(
     Callers that need the state to be visible on-chain before their next
     RPC call (e.g. the x402 client fetching the ATA we just created) must
     wait here first. Returns False on timeout; raises on on-chain failure.
+
+    `poll_interval_seconds` controls how often we hit getSignatureStatuses.
+    Public devnet RPC limits a single method to 4 req/s/IP — the default 1s
+    fits one waiter; concurrent waiters (the batch settler can have several
+    in flight at once) should pass 2.0 to halve the per-method rate.
     """
     settings = get_settings()
     sig = Signature.from_string(signature)
@@ -211,7 +267,7 @@ async def wait_for_tx_confirmation(
                     [sig], search_transaction_history=True
                 )
             except Exception:
-                await asyncio.sleep(1)
+                await asyncio.sleep(poll_interval_seconds)
                 continue
             value = getattr(resp, "value", None) or []
             status = value[0] if value else None
@@ -223,7 +279,7 @@ async def wait_for_tx_confirmation(
                             f"tx {signature} failed on-chain: {status.err}"
                         )
                     return True
-            await asyncio.sleep(1)
+            await asyncio.sleep(poll_interval_seconds)
     return False
 
 

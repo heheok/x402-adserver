@@ -23,6 +23,14 @@ class CampaignStatus(str, Enum):
 
 
 class SettlementStatus(str, Enum):
+    # /proof writes a row at this status, no on-chain tx yet. Background
+    # batch_settler picks pending rows up, groups by (campaign, publisher),
+    # and emits one Solana tx per group every BATCH_FLUSH_INTERVAL_SECONDS.
+    PENDING = "pending"
+    # Atomically claimed by a flusher (loop or refund-handler). Only the
+    # claimer processes the row. On retryable failure the row goes back
+    # to PENDING for the next loop; on confirm it goes to CONFIRMED.
+    FLUSHING = "flushing"
     CONFIRMED = "confirmed"
     FAILED = "failed"
 

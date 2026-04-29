@@ -14,8 +14,6 @@ from ..database import get_db
 from ..dependencies import require_publisher_api_key
 from ..models import Campaign, CampaignStatus, Settlement, SettlementStatus, UsedNonce
 from ..schemas import ProofRequest, ProofResponse
-from ..services.privy import PrivyClient, PrivyError, get_privy_client
-from ..services.solana import build_usdc_transfer_tx
 from ..services.tokens import (
     ProofContextClaims,
     ProofContextError,
@@ -53,16 +51,22 @@ def _settlement_row(
 async def execute_settlement(
     claims: ProofContextClaims,
     db: Session,
-    privy: PrivyClient,
-) -> str:
-    """Run nonce-claim → budget decrement → Privy USDC transfer → settlement row.
+) -> Settlement:
+    """Run nonce-claim → budget reservation → write a pending Settlement row.
 
     Shared between `/proof` (publisher-authed, JWT-verified) and the dashboard's
     simulate-play endpoint (advertiser-authed, claims minted server-side). The
-    caller has already authorized the claims; this helper owns the on-chain + DB
-    state changes. Returns the confirmed tx hash. Raises HTTPException on every
-    failure path — 4xx for validation, 502 for on-chain settlement failure
-    (after persisting a failed settlement row so ops can retry).
+    caller has already authorized the claims; this helper owns the DB state
+    changes. Returns the new pending Settlement row (no tx_hash yet — the
+    background batch settler will broadcast and update). Raises HTTPException
+    on every failure path — 4xx for validation, no on-chain failure path
+    here because there's no on-chain call.
+
+    Session 16.8: this used to broadcast a Solana tx and block on confirmation
+    per play. That model produced false-rollback drift under RPC rate limits.
+    The on-chain work moved to `services.batch_settler`, which groups pending
+    rows by (campaign, publisher) and emits one tx per group per flush
+    interval. See `BATCH-SETTLEMENTS.md` for the full design.
     """
     # 1. Atomic nonce claim — first writer wins, duplicates get 409
     try:
@@ -87,9 +91,10 @@ async def execute_settlement(
     #
     # This is the fix for PLAN's must-fix-before-mainnet #2: previously
     # two concurrent /proof calls on the same campaign could both pass the
-    # Python-side budget check and both increment, last-write-wins, with two
-    # on-chain settlements but only one budget tick. The atomic UPDATE makes
-    # that impossible.
+    # Python-side budget check and both increment, last-write-wins. The
+    # atomic UPDATE makes that impossible. Pending Settlement rows still
+    # hold the reserved budget; if the batch settler ever has to compensate
+    # (definitive on-chain failure), it decrements `spent` back at that point.
     epsilon = 1e-9
     new_spent = Campaign.spent + claims.amount_usdc
     play_cost = Campaign.cpm_price / 1000.0
@@ -127,101 +132,21 @@ async def execute_settlement(
             )
         raise HTTPException(status_code=400, detail="insufficient campaign budget")
 
-    # Re-load post-update so we have the latest spent/status plus the
-    # wallet fields needed for the on-chain transfer.
-    campaign = (
-        db.query(Campaign).filter(Campaign.id == claims.campaign_id).first()
+    # 4. Queue for batch settlement. The batch_settler loop picks pending
+    # rows up every BATCH_FLUSH_INTERVAL_SECONDS and emits one Solana tx
+    # per (campaign, publisher) group.
+    row = _settlement_row(
+        campaign_id=claims.campaign_id,
+        nonce=claims.nonce,
+        publisher_wallet=claims.wallet_id,
+        amount_usdc=claims.amount_usdc,
+        tx_hash=None,
+        status_value=SettlementStatus.PENDING.value,
+        device_id=claims.device_id,
     )
-    if campaign is None:  # belt-and-braces: shouldn't happen
-        raise HTTPException(status_code=404, detail="campaign not found")
-
-    # 4. Build + send USDC transfer via Privy. On failure we still persist a
-    # failed settlement row so ops can see it and retry later (Session 7).
-    try:
-        tx_b64 = await build_usdc_transfer_tx(
-            from_address=campaign.wallet_address,
-            to_address=claims.wallet_id,
-            amount_usdc=claims.amount_usdc,
-            # Nonce is unique per settlement; tagging the tx with it makes
-            # the bytes unique even when multiple concurrent plays share
-            # one blockhash window. Without this, the network dedupes
-            # identical transfers to a single on-chain tx.
-            memo=f"x402:{claims.nonce}",
-        )
-        tx_hash = await privy.sign_and_send_solana(
-            wallet_id=campaign.wallet_id,
-            transaction_base64=tx_b64,
-            reference_id=f"settlement-{claims.nonce}",
-        )
-    except (PrivyError, Exception) as e:  # noqa: BLE001
-        logger.exception(
-            "settlement failed campaign=%s nonce=%s publisher=%s amount=%s",
-            campaign.id,
-            claims.nonce,
-            claims.wallet_id,
-            claims.amount_usdc,
-        )
-        # Compensating UPDATE: refund the budget reservation. We charged it
-        # in step 2-3 expecting the on-chain transfer to land; on Privy
-        # failure (notably `transaction_broadcast_failure` — broadcast did
-        # not happen by Privy's own admission) the budget should be returned.
-        # Also flip status back to ACTIVE if our forward UPDATE flipped it
-        # to COMPLETED on what turned out to be a false-final play.
-        # Nonce stays consumed — publishers must retry with a fresh /bid +
-        # proof_context, not the same one (replay protection).
-        refund_stmt = (
-            update(Campaign)
-            .where(Campaign.id == claims.campaign_id)
-            .values(
-                spent=Campaign.spent - claims.amount_usdc,
-                status=case(
-                    (
-                        (Campaign.status == CampaignStatus.COMPLETED.value)
-                        & (
-                            Campaign.budget
-                            - (Campaign.spent - claims.amount_usdc)
-                            + epsilon
-                            >= Campaign.cpm_price / 1000.0
-                        ),
-                        CampaignStatus.ACTIVE.value,
-                    ),
-                    else_=Campaign.status,
-                ),
-            )
-            .execution_options(synchronize_session=False)
-        )
-        db.execute(refund_stmt)
-        db.add(
-            _settlement_row(
-                campaign_id=campaign.id,
-                nonce=claims.nonce,
-                publisher_wallet=claims.wallet_id,
-                amount_usdc=claims.amount_usdc,
-                tx_hash=None,
-                status_value=SettlementStatus.FAILED.value,
-                device_id=claims.device_id,
-            )
-        )
-        db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"settlement failed: {e}",
-        ) from e
-
-    # 5. Success — record settlement row
-    db.add(
-        _settlement_row(
-            campaign_id=campaign.id,
-            nonce=claims.nonce,
-            publisher_wallet=claims.wallet_id,
-            amount_usdc=claims.amount_usdc,
-            tx_hash=tx_hash,
-            status_value=SettlementStatus.CONFIRMED.value,
-            device_id=claims.device_id,
-        )
-    )
+    db.add(row)
     db.commit()
-    return tx_hash
+    return row
 
 
 @router.post(
@@ -233,7 +158,6 @@ async def proof(
     body: ProofRequest,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    privy: PrivyClient = Depends(get_privy_client),
 ) -> ProofResponse:
     # 1. Decode + verify signature
     try:
@@ -255,5 +179,8 @@ async def proof(
     if body.duration < MIN_PLAY_DURATION_SECONDS:
         raise HTTPException(status_code=400, detail="duration too short")
 
-    tx_hash = await execute_settlement(claims, db, privy)
-    return ProofResponse(status="confirmed", tx_hash=tx_hash)
+    # Session 16.8: queue for batch settlement. Sub-100ms response, no
+    # tx_hash yet — the background batch_settler will broadcast and update
+    # the row's status + tx_hash within BATCH_FLUSH_INTERVAL_SECONDS.
+    row = await execute_settlement(claims, db)
+    return ProofResponse(status=row.status, tx_hash=None, settlement_id=row.id)

@@ -36,13 +36,19 @@ def dashboard_summary(
         hours=24
     )
 
-    # Plays (= confirmed settlements) across all of this advertiser's campaigns.
+    # Plays across all of this advertiser's campaigns. Session 16.8: count
+    # pending + confirmed (the play happened the moment /proof returned;
+    # settlement state is implementation detail). Failed rows still excluded.
+    counted = (
+        SettlementStatus.PENDING.value,
+        SettlementStatus.CONFIRMED.value,
+    )
     base_q = (
         db.query(Settlement)
         .join(Campaign, Settlement.campaign_id == Campaign.id)
         .filter(
             Campaign.advertiser_id == advertiser.user_id,
-            Settlement.status == SettlementStatus.CONFIRMED.value,
+            Settlement.status.in_(counted),
         )
     )
     total_plays = base_q.count()

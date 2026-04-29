@@ -115,12 +115,36 @@ async def _section_campaigns(db) -> None:
         print("  (no campaigns)")
         return
 
-    print(
-        f"  {'campaign':<32} {'status':<10} {'expected':>10} {'actual':>10} {'diff':>10}  flag"
+    # Session 16.8: per-campaign pending settlement totals. The /proof atomic
+    # UPDATE reserves budget at queue time (so `spent` already reflects them),
+    # but the USDC hasn't transferred out of the campaign wallet yet —
+    # on-chain balance reads HIGH by `pending_total` until the batch flushes.
+    # That's IN-FLIGHT, not DRIFT.
+    pending_rows = (
+        db.query(
+            Settlement.campaign_id,
+            func.count(Settlement.id),
+            func.coalesce(func.sum(Settlement.amount_usdc), 0),
+        )
+        .filter(
+            Settlement.status.in_(
+                (SettlementStatus.PENDING.value, SettlementStatus.FLUSHING.value)
+            )
+        )
+        .group_by(Settlement.campaign_id)
+        .all()
     )
-    print(f"  {'-'*32} {'-'*10} {'-'*10} {'-'*10} {'-'*10}  {'-'*5}")
+    pending_by_campaign: dict[str, tuple[int, float]] = {
+        cid: (int(n), float(amt)) for cid, n, amt in pending_rows
+    }
+
+    print(
+        f"  {'campaign':<32} {'status':<10} {'expected':>10} {'actual':>10} {'diff':>10} {'pending':>9}  flag"
+    )
+    print(f"  {'-'*32} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*9}  {'-'*9}")
 
     drift_total = 0.0
+    in_flight_total = 0.0
     refunded_orphaned_fee = 0.0
     refunded_stranded_total = 0.0
 
@@ -131,6 +155,7 @@ async def _section_campaigns(db) -> None:
         spent = float(c.spent or 0)
         fee = float(c.protocol_fee_amount or 0)
         fee_paid = bool(c.protocol_fee_tx_hash)
+        pending_n, pending_amt = pending_by_campaign.get(c.id, (0, 0.0))
 
         if c.status == CampaignStatus.DRAFT.value:
             expected = 0.0
@@ -144,8 +169,16 @@ async def _section_campaigns(db) -> None:
         actual = await get_usdc_balance(c.wallet_address)
         diff = actual - expected
 
+        # IN-FLIGHT: actual is HIGH by ~pending_amt — those settlements are
+        # queued but the on-chain transfer hasn't fired yet. Tolerance is
+        # the campaign tolerance, applied to the post-flush expected (i.e.
+        # diff - pending_amt should be ~0).
+        post_flush_diff = diff - pending_amt
         if abs(diff) <= CAMPAIGN_TOLERANCE:
             flag = "OK"
+        elif pending_n > 0 and abs(post_flush_diff) <= CAMPAIGN_TOLERANCE:
+            flag = "IN-FLIGHT"
+            in_flight_total += pending_amt
         else:
             flag = "DRIFT"
             drift_total += abs(diff)
@@ -155,16 +188,19 @@ async def _section_campaigns(db) -> None:
             if not fee_paid:
                 refunded_orphaned_fee += fee
 
+        pending_str = f"{pending_n}/{pending_amt:.4f}" if pending_n else "—"
         print(
-            f"  {c.id[:32]:<32} {c.status:<10} {expected:>10.4f} {actual:>10.4f} {diff:>+10.4f}  {flag}"
+            f"  {c.id[:32]:<32} {c.status:<10} {expected:>10.4f} {actual:>10.4f} {diff:>+10.4f} {pending_str:>9}  {flag}"
         )
 
     print()
     print(f"  Refunded campaigns — total stranded USDC on-chain: {refunded_stranded_total:.4f}")
     print(f"  Of that, declared orphaned fee (BACKEND-REVIEW §1.1): {refunded_orphaned_fee:.4f}")
+    if in_flight_total > 0:
+        print(f"  ⏳ in-flight (queued, not yet on-chain): {in_flight_total:.4f} USDC")
     if drift_total > 0:
         print(f"  ⚠  cumulative |drift| across DRIFT rows: {drift_total:.4f} USDC")
-    else:
+    elif in_flight_total == 0:
         print("  ✓ no DRIFT rows (every campaign matches expected).")
 
 

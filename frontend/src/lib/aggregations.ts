@@ -28,8 +28,13 @@ export type SettlementRow = {
 
 export type StatsRow = {
   campaign_id: string;
+  // Session 16.8: total_plays + last_24h_plays count pending+confirmed
+  // (plays that happened, regardless of on-chain settlement state).
+  // pending_plays surfaces the unflushed queue length so the UI can show
+  // an "N queued" indicator. total_confirmed_usdc stays confirmed-only.
   total_plays: number;
   last_24h_plays: number;
+  pending_plays?: number;
   total_confirmed_usdc: number;
   plays_by_dma?: Record<string, number>;
   recent_settlements: SettlementRow[];

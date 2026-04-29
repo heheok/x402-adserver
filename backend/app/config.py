@@ -100,6 +100,16 @@ class Settings(BaseSettings):
     protocol_revenue_wallet_id: str = ""
     protocol_revenue_wallet_address: str = ""
 
+    # Batch settlement (Session 16.8). /proof writes a `pending` Settlement
+    # row and returns sub-100ms; this background loop flushes pending rows
+    # every interval, grouping by (campaign, publisher) and emitting one
+    # Solana tx per group. Replaces the per-play on-chain settlement that
+    # was fragile under RPC rate limits. Disable in tests that want
+    # deterministic per-call behavior (e.g. e2e_demo.py).
+    batch_enabled: bool = True
+    batch_flush_interval_seconds: int = 5
+    batch_max_rows_per_flush: int = 100
+
 
 @lru_cache
 def get_settings() -> Settings:

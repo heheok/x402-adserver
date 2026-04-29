@@ -21,10 +21,15 @@ import StatusBadge from "./ui/StatusBadge";
 
 type SimulatePlayResponse = {
   amount_usdc: number;
-  tx_hash: string;
-  solscan_url: string;
+  // Session 16.8: tx_hash + solscan_url are null on the immediate response
+  // (status="pending"); they fill in once the batch settler flushes the row,
+  // visible via the next /stats poll.
+  tx_hash: string | null;
+  solscan_url: string | null;
   publisher_wallet: string;
   dma?: string | null;
+  settlement_id?: string | null;
+  status?: string;
 };
 
 type RefundResponse = {
@@ -386,7 +391,22 @@ export default function CampaignCard({
             gap: 16,
           }}
         >
-          <Stat label="Plays" value={stats.data?.total_plays?.toLocaleString() ?? "—"} />
+          <Stat
+            label="Plays"
+            value={stats.data?.total_plays?.toLocaleString() ?? "—"}
+            sub={
+              stats.data && (stats.data.pending_plays ?? 0) > 0 ? (
+                <span
+                  style={{
+                    color: "var(--tx-2)",
+                    fontFamily: "var(--font-mono)",
+                  }}
+                >
+                  {stats.data.pending_plays} queued
+                </span>
+              ) : undefined
+            }
+          />
           <Stat
             label="CPM"
             value={
@@ -575,7 +595,10 @@ export default function CampaignCard({
                       background:
                         lastPlay.status === "confirmed"
                           ? "var(--sol-teal)"
-                          : "var(--st-expired)",
+                          : lastPlay.status === "pending" ||
+                              lastPlay.status === "flushing"
+                            ? "var(--tx-2)"
+                            : "var(--st-expired)",
                       boxShadow:
                         lastPlay.status === "confirmed"
                           ? "0 0 10px var(--sol-teal)"
@@ -600,8 +623,13 @@ export default function CampaignCard({
                       }}
                     >
                       {timeAgo(lastPlay.created_at)} ·{" "}
-                      {truncateAddress(lastPlay.publisher_wallet, 4)} · settled
-                      on-chain
+                      {truncateAddress(lastPlay.publisher_wallet, 4)} ·{" "}
+                      {lastPlay.status === "confirmed"
+                        ? "settled on-chain"
+                        : lastPlay.status === "pending" ||
+                            lastPlay.status === "flushing"
+                          ? "queued"
+                          : "settlement failed"}
                     </div>
                   </div>
                 </div>
@@ -769,7 +797,9 @@ export default function CampaignCard({
                   color:
                     s.status === "confirmed"
                       ? "var(--sol-teal)"
-                      : "var(--st-expired)",
+                      : s.status === "pending" || s.status === "flushing"
+                        ? "var(--tx-2)"
+                        : "var(--st-expired)",
                   textAlign: "right",
                 }}
               >
@@ -781,6 +811,16 @@ export default function CampaignCard({
                   <Solscan href={s.solscan_url}>
                     {truncateAddress(s.tx_hash, 4)}
                   </Solscan>
+                ) : s.status === "pending" || s.status === "flushing" ? (
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: "var(--tx-2)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    queued
+                  </span>
                 ) : (
                   <span
                     style={{

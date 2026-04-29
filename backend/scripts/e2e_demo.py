@@ -61,6 +61,12 @@ import httpx
 # adds a phantom play, making spent=2*cost_per_play instead of 1*. Pydantic-
 # settings reads process env over .env, so this lands before get_settings().
 os.environ["AUTO_PLAY_ENABLED"] = "false"
+# Same logic for the Session 16.8 batch settler. With BATCH_ENABLED=true,
+# the loop ticks every BATCH_FLUSH_INTERVAL_SECONDS and could process our
+# pending rows asynchronously — making the post-/proof "spent" assertion
+# race the loop. We disable the lifespan loop and flush manually after each
+# /proof via flush_all() (see step_happy_path / step_budget_exhausted).
+os.environ["BATCH_ENABLED"] = "false"
 
 sys.path.insert(0, "/app")
 
@@ -71,6 +77,7 @@ from app.config import get_settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 from app.models import Campaign, CampaignStatus, Settlement, SettlementStatus  # noqa: E402
+from app.services.batch_settler import flush_all  # noqa: E402
 from app.services.privy import PrivyClient, PrivyError  # noqa: E402
 from app.services.solana import build_sol_transfer_tx, build_usdc_transfer_tx, get_usdc_balance  # noqa: E402
 from app.services.tokens import ProofContextClaims, encode_proof_context  # noqa: E402
@@ -422,17 +429,19 @@ async def step_happy_path(
         report.record("proof returns 200", False, f"status={r.status_code} body={r.text[:200]}")
         return proof_context
     body = r.json()
-    tx = body.get("tx_hash")
-    if not tx:
-        report.record("proof returns tx_hash", False, f"body={body}")
+    # Session 16.8: /proof returns immediately with status=pending, no
+    # tx_hash. The settlement_id lets us track the row through to confirm.
+    settlement_id = body.get("settlement_id")
+    if not settlement_id or body.get("status") != SettlementStatus.PENDING.value:
+        report.record(
+            "proof returns pending settlement",
+            False,
+            f"body={body}",
+        )
         return proof_context
-    report.record(
-        "proof settles on devnet",
-        True,
-        f"tx https://solscan.io/tx/{tx}?cluster=devnet",
-    )
+    report.record("proof returns pending settlement", True)
 
-    # DB spent bumped by one play
+    # DB spent bumped by one play (atomic UPDATE at /proof time, before flush)
     db = SessionLocal()
     try:
         fresh = db.query(Campaign).filter(Campaign.id == campaign.id).first()
@@ -443,6 +452,40 @@ async def step_happy_path(
             ok,
             f"spent={fresh.spent if fresh else 'missing'}",
         )
+    finally:
+        db.close()
+
+    # Manually flush so the on-chain assertion below can pass without
+    # relying on the lifespan loop (disabled at the top of this file).
+    flush_result = await flush_all()
+    if flush_result.confirmed_rows < 1 or flush_result.failures:
+        report.record(
+            "batch flush settles pending",
+            False,
+            f"confirmed={flush_result.confirmed_rows} failed={flush_result.failed_rows} "
+            f"left_pending={flush_result.left_pending_rows} errors={flush_result.failures[:1]}",
+        )
+        return proof_context
+
+    db = SessionLocal()
+    try:
+        s = db.query(Settlement).filter(Settlement.id == settlement_id).first()
+        ok = (
+            s is not None
+            and s.status == SettlementStatus.CONFIRMED.value
+            and bool(s.tx_hash)
+        )
+        report.record(
+            "settlement transitioned pending -> confirmed",
+            ok,
+            f"status={s.status if s else 'missing'} tx={s.tx_hash[:16] + '…' if s and s.tx_hash else None}",
+        )
+        if ok and s and s.tx_hash:
+            report.record(
+                "proof settles on devnet (post-flush)",
+                True,
+                f"tx https://solscan.io/tx/{s.tx_hash}?cluster=devnet",
+            )
     finally:
         db.close()
 
@@ -586,6 +629,18 @@ async def step_budget_exhausted(
         report.record(
             f"drained tiny campaign in {expected_plays} plays", True
         )
+
+        # Session 16.8: drain the pending settlements before the final-bid
+        # check + refund. Atomic budget UPDATE at /proof time already moved
+        # `spent` so the empty-bid assertion passes either way, but flushing
+        # here keeps the campaign wallet in sync with DB before refund.
+        flush_result = await flush_all()
+        if flush_result.failures:
+            report.record(
+                "tiny campaign batch flush",
+                False,
+                f"failures={flush_result.failures[:1]}",
+            )
 
         # One more bid — budget is 0, FIFO should pass on us.
         r = await _post(client, "/bid", _bid_payload(PUBLISHER_WALLET))
@@ -747,7 +802,7 @@ async def main() -> int:
         marker = "✓" if s.passed else "✗"
         print(f"    {marker} {s.name}")
 
-    # Dangling failed settlements?
+    # Dangling failed or pending settlements?
     db = SessionLocal()
     try:
         failed = (
@@ -755,10 +810,24 @@ async def main() -> int:
             .filter(Settlement.status == SettlementStatus.FAILED.value)
             .count()
         )
+        pending = (
+            db.query(Settlement)
+            .filter(
+                Settlement.status.in_(
+                    (
+                        SettlementStatus.PENDING.value,
+                        SettlementStatus.FLUSHING.value,
+                    )
+                )
+            )
+            .count()
+        )
     finally:
         db.close()
     if failed:
         print(f"\n  note: {failed} failed settlement(s) in DB — run scripts/retry_settlements.py")
+    if pending:
+        print(f"\n  note: {pending} pending/flushing settlement(s) — re-run to flush, or check batch_settler logs")
 
     return 0 if report.all_passed else 1
 
