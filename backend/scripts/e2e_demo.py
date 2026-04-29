@@ -77,7 +77,10 @@ from app.config import get_settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 from app.models import Campaign, CampaignStatus, Settlement, SettlementStatus  # noqa: E402
-from app.services.batch_settler import flush_all  # noqa: E402
+from app.services.batch_settler import (  # noqa: E402
+    build_batch_identifiers,
+    flush_all,
+)
 from app.services.privy import PrivyClient, PrivyError  # noqa: E402
 from app.services.solana import build_sol_transfer_tx, build_usdc_transfer_tx, get_usdc_balance  # noqa: E402
 from app.services.tokens import ProofContextClaims, encode_proof_context  # noqa: E402
@@ -725,6 +728,324 @@ async def step_double_refund(
         db.close()
 
 
+async def step_reference_id_format() -> None:
+    """Regression guard for the [:8] truncation that produced 0.018 USDC of
+    drift in the 2026-04-29 soak. With auto-play nonces of the form
+    "auto-{32 hex}", the original `first_nonce[:8]` only had 3 hex chars of
+    uniqueness — collided after ~64 batches per campaign — and
+    Privy's post-broadcast reference_id check (BUSINESS-CONSTRAINTS.md §3)
+    turned that into publisher-MORE / campaign-DRIFT. Full first_nonce
+    avoids it. Asserting length here catches a regression in milliseconds."""
+    _header("3f. Regression: reference_id uses full nonce")
+    sample_campaign = "abc12345-c620-4d6f-825c-0fb13dc24182"
+    sample_nonce = f"auto-{uuid4().hex}"
+    _memo, ref_id = build_batch_identifiers(sample_campaign, sample_nonce, 5)
+    long_enough = len(ref_id) > 30
+    nonce_present = sample_nonce in ref_id
+    under_64 = len(ref_id) <= 64
+    report.record(
+        "reference_id includes full first_nonce",
+        long_enough and nonce_present,
+        f"len={len(ref_id)} ref_id={ref_id}",
+    )
+    report.record(
+        "reference_id ≤ 64 chars (Privy limit)",
+        under_64,
+        f"len={len(ref_id)}",
+    )
+
+
+async def step_refund_with_pending(
+    privy: PrivyClient,
+    treasury_wallet_id: str,
+    treasury_address: str,
+    advertiser_id: str,
+    advertiser_wallet: str,
+) -> None:
+    """Validates that POST /api/campaigns/:id/refund flushes pending rows
+    BEFORE computing remaining. Without this, refund would walk USDC out
+    of the campaign wallet that publishers are still owed → drift on the
+    next loop tick when batch_settler tries to pay them.
+    """
+    _header("3g. Refund flushes pending settlements first")
+
+    # Local import to avoid circular import at module load (matches
+    # auto_play.py's pattern).
+    from app.dependencies import AdvertiserIdentity
+    from app.routers.campaigns import refund_campaign
+
+    try:
+        camp = await _seed_campaign(
+            privy=privy,
+            treasury_wallet_id=treasury_wallet_id,
+            treasury_address=treasury_address,
+            advertiser_id=advertiser_id,
+            advertiser_wallet=advertiser_wallet,
+            budget=TINY_BUDGET_USDC,
+            cpm=CPM_USDC,
+            name="e2e-refund-pending",
+        )
+    except (PrivyError, RuntimeError) as e:
+        report.record("seed refund-pending campaign", False, str(e))
+        return
+
+    # Engineer 3 pending settlement rows + reserve their budget. Bypasses
+    # the /proof path so we don't need a publisher API key here; the
+    # batcher doesn't care how rows got into status='pending'.
+    from decimal import Decimal
+
+    amount = Decimal("0.0005")
+    n_rows = 3
+    total_pending = amount * n_rows
+
+    db = SessionLocal()
+    try:
+        from app.models import UsedNonce
+
+        for _ in range(n_rows):
+            n = f"e2e-rp-{uuid4().hex}"
+            db.add(UsedNonce(nonce=n))
+            db.add(
+                Settlement(
+                    id=str(uuid4()),
+                    campaign_id=camp.id,
+                    nonce=n,
+                    publisher_wallet=PUBLISHER_WALLET,
+                    amount_usdc=amount,
+                    tx_hash=None,
+                    status=SettlementStatus.PENDING.value,
+                    device_id=None,
+                )
+            )
+        # Mirror /proof's atomic budget reservation
+        from sqlalchemy import update as sql_update
+
+        db.execute(
+            sql_update(Campaign)
+            .where(Campaign.id == camp.id)
+            .values(spent=Campaign.spent + total_pending)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        # Pause so the campaign is refundable
+        db.execute(
+            sql_update(Campaign)
+            .where(Campaign.id == camp.id)
+            .values(status=CampaignStatus.PAUSED.value)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    # Snapshot pre-refund: 3 pending rows expected
+    db = SessionLocal()
+    try:
+        pre_pending = (
+            db.query(Settlement)
+            .filter(Settlement.campaign_id == camp.id)
+            .filter(Settlement.status == SettlementStatus.PENDING.value)
+            .count()
+        )
+    finally:
+        db.close()
+    if pre_pending != n_rows:
+        report.record(
+            "engineered pending rows visible in DB",
+            False,
+            f"expected {n_rows}, got {pre_pending}",
+        )
+        return
+    report.record("engineered pending rows visible in DB", True)
+
+    # Call the actual refund handler. Bypasses FastAPI dep injection (same
+    # pattern as step_double_refund) but exercises the real function —
+    # including the new synchronous flush_campaign call.
+    advertiser = AdvertiserIdentity(user_id=advertiser_id, wallet_address=advertiser_wallet)
+    db = SessionLocal()
+    try:
+        refund_resp = await refund_campaign(
+            campaign_id=camp.id,
+            advertiser=advertiser,
+            privy=privy,
+            db=db,
+        )
+    except Exception as e:  # noqa: BLE001
+        report.record("refund handler succeeded", False, f"{type(e).__name__}: {e}")
+        return
+    finally:
+        db.close()
+
+    # Post-refund: pending should be ZERO (all flushed by flush_campaign),
+    # all of those rows should now be CONFIRMED (with a tx_hash), and the
+    # refund amount should reflect the post-flush remaining (= original
+    # budget - already-flushed pending; spent is unchanged because
+    # confirming a pending doesn't change spent).
+    db = SessionLocal()
+    try:
+        post_pending = (
+            db.query(Settlement)
+            .filter(Settlement.campaign_id == camp.id)
+            .filter(Settlement.status == SettlementStatus.PENDING.value)
+            .count()
+        )
+        post_confirmed_for_camp = (
+            db.query(Settlement)
+            .filter(Settlement.campaign_id == camp.id)
+            .filter(Settlement.status == SettlementStatus.CONFIRMED.value)
+            .count()
+        )
+        c_after = db.query(Campaign).filter(Campaign.id == camp.id).first()
+    finally:
+        db.close()
+
+    report.record(
+        "flush_campaign drained pending before refund",
+        post_pending == 0,
+        f"pending={post_pending}",
+    )
+    report.record(
+        "previously-pending rows now confirmed",
+        post_confirmed_for_camp >= n_rows,
+        f"confirmed={post_confirmed_for_camp}",
+    )
+    report.record(
+        "refund response includes tx_hash",
+        refund_resp.tx_hash is not None and refund_resp.refund_amount > 0,
+        f"refund_amount={refund_resp.refund_amount} tx={refund_resp.tx_hash[:16] if refund_resp.tx_hash else None}…",
+    )
+    report.record(
+        "campaign status -> refunded",
+        c_after is not None and c_after.status == CampaignStatus.REFUNDED.value,
+        f"status={c_after.status if c_after else 'missing'}",
+    )
+
+
+async def step_multi_campaign_batch_isolation(
+    privy: PrivyClient,
+    treasury_wallet_id: str,
+    treasury_address: str,
+    advertiser_id: str,
+    advertiser_wallet: str,
+) -> None:
+    """Two campaigns, same publisher, both with pending rows. flush_all
+    must produce TWO distinct on-chain txs (one per (campaign, publisher)
+    group), not one combined tx — campaigns must be independently
+    accountable on-chain so refund/audit math stays clean per-campaign.
+    """
+    _header("3h. Multi-campaign batch isolation")
+
+    # Seed two fresh small campaigns. They share the demo publisher.
+    try:
+        camp_a = await _seed_campaign(
+            privy=privy,
+            treasury_wallet_id=treasury_wallet_id,
+            treasury_address=treasury_address,
+            advertiser_id=advertiser_id,
+            advertiser_wallet=advertiser_wallet,
+            budget=TINY_BUDGET_USDC,
+            cpm=CPM_USDC,
+            name="e2e-iso-a",
+        )
+        camp_b = await _seed_campaign(
+            privy=privy,
+            treasury_wallet_id=treasury_wallet_id,
+            treasury_address=treasury_address,
+            advertiser_id=advertiser_id,
+            advertiser_wallet=advertiser_wallet,
+            budget=TINY_BUDGET_USDC,
+            cpm=CPM_USDC,
+            name="e2e-iso-b",
+        )
+    except (PrivyError, RuntimeError) as e:
+        report.record("seed isolation campaigns", False, str(e))
+        return
+
+    from decimal import Decimal
+
+    from sqlalchemy import update as sql_update
+
+    from app.models import UsedNonce
+
+    amount = Decimal("0.0005")
+    db = SessionLocal()
+    try:
+        for camp in (camp_a, camp_b):
+            for _ in range(2):
+                n = f"e2e-iso-{uuid4().hex}"
+                db.add(UsedNonce(nonce=n))
+                db.add(
+                    Settlement(
+                        id=str(uuid4()),
+                        campaign_id=camp.id,
+                        nonce=n,
+                        publisher_wallet=PUBLISHER_WALLET,
+                        amount_usdc=amount,
+                        tx_hash=None,
+                        status=SettlementStatus.PENDING.value,
+                        device_id=None,
+                    )
+                )
+            db.execute(
+                sql_update(Campaign)
+                .where(Campaign.id == camp.id)
+                .values(spent=Campaign.spent + amount * 2)
+                .execution_options(synchronize_session=False)
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    flush_result = await flush_all(privy)
+    if flush_result.failures:
+        report.record(
+            "flush_all confirmed both groups",
+            False,
+            f"failures={flush_result.failures[:1]}",
+        )
+        return
+
+    # Each campaign should have its own distinct tx_hash on its 2 confirmed rows
+    db = SessionLocal()
+    try:
+        rows_a = (
+            db.query(Settlement)
+            .filter(Settlement.campaign_id == camp_a.id)
+            .filter(Settlement.status == SettlementStatus.CONFIRMED.value)
+            .all()
+        )
+        rows_b = (
+            db.query(Settlement)
+            .filter(Settlement.campaign_id == camp_b.id)
+            .filter(Settlement.status == SettlementStatus.CONFIRMED.value)
+            .all()
+        )
+    finally:
+        db.close()
+
+    tx_a = {r.tx_hash for r in rows_a if r.tx_hash}
+    tx_b = {r.tx_hash for r in rows_b if r.tx_hash}
+    same_tx_within_a = len(tx_a) == 1
+    same_tx_within_b = len(tx_b) == 1
+    different_across = bool(tx_a) and bool(tx_b) and tx_a.isdisjoint(tx_b)
+
+    report.record(
+        "campaign A's batch settled in one tx",
+        same_tx_within_a,
+        f"tx_a={list(tx_a)[:1]}",
+    )
+    report.record(
+        "campaign B's batch settled in one tx",
+        same_tx_within_b,
+        f"tx_b={list(tx_b)[:1]}",
+    )
+    report.record(
+        "campaigns settled in DIFFERENT on-chain txs (isolation)",
+        different_across,
+        f"a={list(tx_a)[:1]} b={list(tx_b)[:1]}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -781,6 +1102,21 @@ async def main() -> int:
             await step_paused_no_bid(client, main_campaign)
             await step_budget_exhausted(
                 client=client,
+                privy=privy,
+                treasury_wallet_id=treasury_wallet_id,
+                treasury_address=treasury_address,
+                advertiser_id=advertiser_id,
+                advertiser_wallet=advertiser_wallet,
+            )
+            await step_reference_id_format()
+            await step_refund_with_pending(
+                privy=privy,
+                treasury_wallet_id=treasury_wallet_id,
+                treasury_address=treasury_address,
+                advertiser_id=advertiser_id,
+                advertiser_wallet=advertiser_wallet,
+            )
+            await step_multi_campaign_batch_isolation(
                 privy=privy,
                 treasury_wallet_id=treasury_wallet_id,
                 treasury_address=treasury_address,

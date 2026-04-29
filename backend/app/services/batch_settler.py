@@ -156,6 +156,39 @@ def _mark_back_to_pending(db: Session, ids: list[str]) -> None:
     db.commit()
 
 
+REFERENCE_ID_MAX_LEN = 64  # Privy hard limit
+
+
+def build_batch_identifiers(
+    campaign_id: str, first_nonce: str, n_rows: int
+) -> tuple[str, str]:
+    """Pure helper: build the (memo, reference_id) tuple for a batch group.
+
+    Extracted so callers (and the e2e regression test) can inspect the
+    output without going through the full _flush_group path. The
+    correctness criterion the e2e asserts: reference_id MUST contain the
+    full first_nonce, not a truncated prefix — otherwise auto-play
+    workloads collide (~64 batches per campaign) and trigger the
+    post-broadcast-uncertain drift documented in
+    BUSINESS-CONSTRAINTS.md §3.
+
+    Raises ValueError if the reference_id would exceed Privy's 64-char
+    limit. Production nonces (bid token_urlsafe(16)=22, auto-{32}=37,
+    simulate-{32}=41) all fit in the 49-char nonce budget. New nonce
+    formats must respect this — better to fail loudly here than have
+    Privy reject the broadcast at flush time.
+    """
+    memo = f"x402-batch:{first_nonce[:8]}-{n_rows}"
+    reference_id = f"batch-{campaign_id[:8]}-{first_nonce}"
+    if len(reference_id) > REFERENCE_ID_MAX_LEN:
+        raise ValueError(
+            f"reference_id exceeds Privy {REFERENCE_ID_MAX_LEN}-char limit "
+            f"({len(reference_id)} chars). Nonce too long: {first_nonce!r}. "
+            f"Max nonce length: {REFERENCE_ID_MAX_LEN - 15} chars."
+        )
+    return memo, reference_id
+
+
 def _compensate_failed(db: Session, rows: list[Settlement]) -> None:
     """Definitive failure path: flip rows to 'failed' AND release the
     reserved budget on each row's campaign. This is the only place
@@ -229,24 +262,12 @@ async def _flush_group(
     first_nonce = rows[0].nonce
     row_ids = [r.id for r in rows]
 
-    # Deterministic per-group identifiers. Same group rebuilt across loop
-    # ticks (e.g. crash recovery) yields the same reference_id → Privy
-    # returns the same tx hash without re-broadcasting. Memo makes the tx
-    # bytes-unique across blockhash windows so the network doesn't dedup
-    # different batches that happen to hit the same (from, to, amount).
-    #
-    # CRITICAL: use the FULL first_nonce, not a truncated prefix. Auto-play
-    # nonces are "auto-{32 hex}" → first_nonce[:8] = "auto-XYZ" with only 3
-    # hex chars of uniqueness (4096 combos). With ~360 batches per campaign
-    # over a 30-min soak, birthday-paradox collisions are near-certain →
-    # Privy returns 400 "reference_id already exists" → we used to compensate
-    # those batches → drift, because Privy's reference_id check is
-    # POST-broadcast (per BUSINESS-CONSTRAINTS.md §3): the colliding tx had
-    # already broadcast and paid the publisher by the time we saw the 400.
-    # Full first_nonce (37 chars for auto-play) has effectively no collision
-    # risk. Total reference_id length: 6 + 8 + 1 + 37 = 52 chars (≤64 limit).
-    memo = f"x402-batch:{first_nonce[:8]}-{len(rows)}"
-    reference_id = f"batch-{campaign.id[:8]}-{first_nonce}"
+    # Per-group identifiers via the build_batch_identifiers helper. See its
+    # docstring + BUSINESS-CONSTRAINTS.md §3 for the collision-vs-drift
+    # constraint that mandates the full first_nonce (not [:8]).
+    memo, reference_id = build_batch_identifiers(
+        campaign.id, first_nonce, len(rows)
+    )
 
     tx_hash: str | None = None
     try:
