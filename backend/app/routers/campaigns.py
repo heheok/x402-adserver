@@ -440,12 +440,16 @@ def campaign_stats(
 ) -> CampaignStats:
     c = _owned_campaign(db, campaign_id, advertiser)
 
-    # Session 16.8: count pending + confirmed for play-counting purposes
-    # (the play happened the moment /proof returned; settlement state is an
-    # implementation detail). USDC totals stay confirmed-only — that's
+    # Session 16.8: count pending + flushing + confirmed for play-counting
+    # purposes (the play happened the moment /proof returned; settlement
+    # state is an implementation detail). FLUSHING is the brief window
+    # while the batch_settler is broadcasting on-chain — without it, the
+    # UI count flickers down by 1 when a row is claimed and back up when
+    # it confirms. USDC totals stay confirmed-only — that's
     # money-actually-moved-on-chain, not money-owed.
     counted_statuses = (
         SettlementStatus.PENDING.value,
+        SettlementStatus.FLUSHING.value,
         SettlementStatus.CONFIRMED.value,
     )
     total_plays = (

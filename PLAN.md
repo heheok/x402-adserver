@@ -83,31 +83,6 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 
 - Blockers, polish, stretch items (batch settlement toggle, better fraud checks).
 
-**UI polish backlog (logged 2026-04-30, post Session 16.9 browser walk):**
-
-- **Faucet button is not disabled while a faucet tx is in-flight** — `WalletChip.tsx`
-  renders the "Get test USDC" button as `disabled={faucet.isPending}` only for
-  the immediate POST round-trip; once the response lands, `isPending` is false
-  but the on-chain transfer can still take seconds to confirm. User can spam
-  the button → multiple Privy txs queue up. Fix: keep the button disabled
-  through the `pendingAmount` window (i.e. `disabled={faucet.isPending || pendingAmount !== null}`)
-  so it stays locked until the wallet poll observes the new balance.
-
-- **Total plays + per-DMA map markers flicker during pending→flushing→confirmed**
-  on `CampaignCard`. Symptom: a play arrives, count goes from N to N+1, then
-  briefly drops back to N for ~5s, then jumps back to N+1. Root cause:
-  `routers/campaigns.campaign_stats` counts settlements with status in
-  `(PENDING, CONFIRMED)` for `total_plays` and `plays_by_dma` — but the batch
-  settler atomically flips PENDING → FLUSHING when it claims a row, and FLUSHING
-  is NOT in the counted set, so the row is invisible to the count for the
-  duration of the on-chain wait. Fix: add `SettlementStatus.FLUSHING.value` to
-  `counted_statuses` in `campaign_stats` and the equivalent filter in
-  `routers/dashboard.dashboard_summary` (`base_q` and the `recent_activity`
-  query). Same idea: a FLUSHING row represents "play happened, money is on
-  the way" — it should count exactly like PENDING does. The brief mention in
-  Session 16.8 worklog of "pending + confirmed counts" predates the FLUSHING
-  state being introduced; the count filter just didn't get updated.
-
 ---
 
 ## Protocol notes (research findings, keep handy)

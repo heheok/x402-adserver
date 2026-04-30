@@ -395,10 +395,14 @@ export default function WalletChip() {
             className="x-btn x-btn-grad"
             style={{ width: "100%", marginTop: 12, height: 40 }}
             onClick={() => faucet.mutate()}
-            disabled={faucet.isPending}
+            disabled={faucet.isPending || pendingAmount !== null}
           >
             <Icon name="plus" size={13} stroke={2} />
-            {faucet.isPending ? "Sending…" : "Get test USDC"}
+            {faucet.isPending
+              ? "Sending…"
+              : pendingAmount !== null
+                ? "Confirming…"
+                : "Get test USDC"}
           </button>
 
           {faucet.isError && (
