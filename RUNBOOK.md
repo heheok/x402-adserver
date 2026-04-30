@@ -52,6 +52,95 @@ docker compose up -d backend
 
 ---
 
+## Prod-shape compose (local validation)
+
+`docker-compose.prod.yml` is what runs on the GCE VM (Session 18). Use it
+locally to validate any change before deploying. The shape: backend on the
+internal docker network only (no public 8000), Caddy on 80/443 doing TLS
+termination + static SPA + reverse proxy, multi-stage `frontend/Dockerfile.prod`
+that bakes the Vite build into the Caddy image. See `worklog/session-17.md`
+for the full topology rationale.
+
+### Stop dev first (always)
+
+Both stacks bind-mount `./backend/data`, so running them at the same time
+means two `batch_settler` loops racing on the same SQLite file. **Always
+`docker compose down` before bringing up the prod-shape.**
+
+### Start / stop / rebuild
+
+```bash
+docker compose down                                                 # stop dev stack first
+docker compose -f docker-compose.prod.yml up -d --build              # start prod-shape (cold ~80s, incremental ~15s)
+docker compose -f docker-compose.prod.yml logs -f caddy              # tail Caddy access + error logs
+docker compose -f docker-compose.prod.yml logs -f backend            # tail FastAPI logs
+docker compose -f docker-compose.prod.yml down                       # stop prod-shape
+```
+
+### Rebuild after code changes
+
+Code is baked into images — `--reload` and the source bind-mount are gone.
+Rebuild whichever container's source changed:
+
+```bash
+# React/Caddyfile changes → rebuild the multi-stage caddy+SPA image
+docker compose -f docker-compose.prod.yml up -d --build caddy
+
+# Python changes → rebuild the backend image
+docker compose -f docker-compose.prod.yml up -d --build backend
+```
+
+After a frontend rebuild, **hard-refresh the browser** (Ctrl+Shift+R) — the
+old JS bundle is otherwise cached and you'll see stale behavior.
+
+### Open the prod-shape
+
+- Dashboard: https://localhost
+- Browser will warn about the cert. Caddy issues a self-signed cert from its
+  local CA for any domain that resolves to `localhost`. Click through; the
+  cert + CA persist via the `caddy_data` named volume so the warning only
+  appears the first time per browser profile.
+- API health (through Caddy): https://localhost/health
+
+### Set DOMAIN for non-localhost testing
+
+Caddy reads `${DOMAIN}` from the compose env (defaults to `localhost`). For
+testing with a real domain that resolves to your machine, or against a
+staging hostname:
+
+```bash
+DOMAIN=staging.your-domain.com docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Caddy will switch from local CA to Let's Encrypt for any non-localhost
+domain. Port 80 must be reachable from the public internet for the HTTP-01
+challenge.
+
+### Solana RPC 403 ("Access forbidden")
+
+If the funding flow fails with a 403 from `/solana-rpc`, Solana's anti-abuse
+layer is rejecting the proxy's headers. The Caddyfile strips `Origin` and
+`Referer` for this exact reason — verify those `header_up -Origin` and
+`header_up -Referer` lines are still in the `@solana_rpc` handle block. Quick
+reproduction:
+
+```bash
+# Should succeed (200, "ok")
+curl -sk -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+  https://localhost/solana-rpc
+
+# Should also succeed AFTER the strip; was 403 before the fix
+curl -sk -X POST -H "Content-Type: application/json" -H "Origin: https://localhost" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+  https://localhost/solana-rpc
+```
+
+See `worklog/session-17.md` and `memory/project_x402_solana_rpc_origin_strip.md`
+for the full diagnostic.
+
+---
+
 ## Balance checks
 
 ### Treasury (or any address)
