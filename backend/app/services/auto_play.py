@@ -34,14 +34,14 @@ logger = logging.getLogger(__name__)
 
 # Snapshot of an eligible campaign captured under one DB session, safe to
 # read from concurrent tasks (each opens its own session for the actual
-# settlement write).
-_EligibleSnapshot = tuple[str, float, tuple[str, ...]]
-# fields: (campaign_id, cpm_price, target_dmas)
+# settlement write). cpm_price stays in micro per 1000 plays.
+_EligibleSnapshot = tuple[str, int, tuple[str, ...]]
+# fields: (campaign_id, cpm_price_micro, target_dmas)
 
 
 async def _settle_one(
     campaign_id: str,
-    cpm_price: float,
+    cpm_price_micro: int,
     device: dict[str, str],
     demo_publisher: str,
 ) -> None:
@@ -57,22 +57,22 @@ async def _settle_one(
 
     db = SessionLocal()
     try:
-        amount = cpm_price / 1000.0
+        amount_micro = cpm_price_micro // 1000
         claims = ProofContextClaims(
             campaign_id=campaign_id,
             bid_id=f"auto-{uuid4().hex[:8]}",
             wallet_id=demo_publisher,
             nonce=f"auto-{uuid4().hex}",
             created_at=int(time.time()),
-            amount_usdc=amount,
+            amount_micro=amount_micro,
             device_id=device["device_id"],
         )
         try:
             row = await execute_settlement(claims, db)
             logger.info(
-                "auto-play queued: campaign=%s amount=%s device=%s venue=%r dma=%s settlement=%s",
+                "auto-play queued: campaign=%s amount_micro=%d device=%s venue=%r dma=%s settlement=%s",
                 campaign_id,
-                amount,
+                amount_micro,
                 device["device_id"],
                 device["venue_name"],
                 device["dma"],
@@ -115,7 +115,8 @@ async def _tick() -> None:
         # filters so we only simulate plays the campaign would accept.
         eligible: list[_EligibleSnapshot] = []
         for c in actives:
-            if float(c.budget) - float(c.spent) + 1e-9 < float(c.cpm_price) / 1000.0:
+            cost_per_play_micro = int(c.cpm_price) // 1000
+            if int(c.budget) - int(c.spent) < cost_per_play_micro:
                 continue
             if c.start_date is not None and c.start_date > today:
                 continue
@@ -125,7 +126,7 @@ async def _tick() -> None:
                 continue
             # Capture only primitives + the DMA list so we can use the
             # snapshot from concurrent tasks after this session closes.
-            eligible.append((c.id, float(c.cpm_price), tuple(c.target_dmas)))
+            eligible.append((c.id, int(c.cpm_price), tuple(c.target_dmas)))
     finally:
         db.close()
 

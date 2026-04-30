@@ -8,6 +8,23 @@ from .services.venues import DMA_LABELS
 
 CANONICAL_DMA_LABELS: set[str] = set(DMA_LABELS.values())
 
+# ---------------------------------------------------------------------------
+# Money on the wire (Session 16.9)
+# ---------------------------------------------------------------------------
+#
+# Money fields are integer microUSDC serialized as a JSON STRING. 1 USDC =
+# 1_000_000 microUSDC. The wire format is "amount in atomic units, as a
+# string" — same convention used by the x402 spec, the SPL token program,
+# and every Solana RPC for token amounts. Type alias `MicroStr` documents
+# this at every field site. Internally the value is `int`; the Pydantic
+# field validator coerces it to `str` on serialization.
+#
+# Why string and not number: at platform scale a sum of campaigns can exceed
+# JS Number safe-integer range (2^53 ≈ 9e15 micro = $9B). String + a BigInt
+# helper on the client guarantees zero precision loss regardless of value.
+# Float on the wire is the footgun this refactor exists to eliminate.
+MicroStr = str
+
 
 class HealthResponse(BaseModel):
     status: str
@@ -17,11 +34,11 @@ class HealthResponse(BaseModel):
 
 class WalletInfo(BaseModel):
     wallet_address: str
-    usdc_balance: float
+    usdc_balance: MicroStr  # microUSDC string
 
 
 class FaucetResponse(BaseModel):
-    amount: float
+    amount: MicroStr  # microUSDC string
     tx_hash: str
 
 
@@ -59,14 +76,14 @@ class CampaignSummary(BaseModel):
     id: str
     name: str
     status: str
-    budget: float
-    spent: float
-    remaining: float
+    budget: MicroStr  # microUSDC string
+    spent: MicroStr
+    remaining: MicroStr
     wallet_address: str
     target_dmas: list[str] | None = None
     start_date: date | None = None
     end_date: date | None = None
-    protocol_fee_amount: float | None = None
+    protocol_fee_amount: MicroStr | None = None
     protocol_fee_tx_hash: str | None = None
     protocol_fee_solscan_url: str | None = None
 
@@ -75,7 +92,7 @@ class SettlementSummary(BaseModel):
     id: str
     nonce: str
     publisher_wallet: str
-    amount_usdc: float
+    amount_usdc: MicroStr  # microUSDC string (field name kept for API stability)
     tx_hash: str | None
     solscan_url: str | None
     status: str
@@ -90,9 +107,9 @@ class SettlementSummary(BaseModel):
 class CampaignStats(BaseModel):
     campaign_id: str
     status: str
-    budget: float
-    spent: float
-    remaining_budget: float
+    budget: MicroStr  # microUSDC string
+    spent: MicroStr
+    remaining_budget: MicroStr
     # Session 16.8: total_plays + last_24h_plays count pending + confirmed
     # (plays that happened, regardless of on-chain settlement state).
     # pending_plays surfaces the unflushed batch as a "N queued" indicator.
@@ -100,12 +117,12 @@ class CampaignStats(BaseModel):
     total_plays: int
     last_24h_plays: int = 0
     pending_plays: int = 0
-    total_confirmed_usdc: float
-    cpm_price: float
+    total_confirmed_usdc: MicroStr  # microUSDC string
+    cpm_price: MicroStr  # microUSDC per 1000 plays, as a string
     target_dmas: list[str] | None = None
     start_date: date | None = None
     end_date: date | None = None
-    protocol_fee_amount: float | None = None
+    protocol_fee_amount: MicroStr | None = None
     protocol_fee_tx_hash: str | None = None
     protocol_fee_solscan_url: str | None = None
     # Lifetime confirmed-play counts bucketed by DMA. Powers the
@@ -116,7 +133,7 @@ class CampaignStats(BaseModel):
 
 
 class RefundResponse(BaseModel):
-    refund_amount: float
+    refund_amount: MicroStr  # microUSDC string
     tx_hash: str | None
     solscan_url: str | None
 
@@ -129,7 +146,7 @@ class DashboardActivityRow(BaseModel):
     campaign_id: str
     campaign_name: str
     publisher_wallet: str
-    amount_usdc: float
+    amount_usdc: MicroStr  # microUSDC string
     tx_hash: str | None
     solscan_url: str | None
     status: str
@@ -148,7 +165,7 @@ class DashboardSummary(BaseModel):
 
 
 class SimulatePlayResponse(BaseModel):
-    amount_usdc: float
+    amount_usdc: MicroStr  # microUSDC string
     # Session 16.8: tx_hash + solscan_url are populated once the batch
     # settler flushes the pending row (within BATCH_FLUSH_INTERVAL_SECONDS).
     # On the immediate response they're null and status="pending"; client
@@ -196,11 +213,11 @@ class QuoteResponse(BaseModel):
     plays_per_screen_per_day: int
     days: int
     total_plays: int
-    cpm_price: float
-    total_usdc: float
-    protocol_fee_pct: float
-    protocol_fee_usdc: float
-    total_to_escrow_usdc: float
+    cpm_price: MicroStr  # microUSDC per 1000 plays, as a string
+    total_usdc: MicroStr  # microUSDC string (field name kept for API stability)
+    protocol_fee_pct: float  # display-only ratio (e.g. 0.025 for 2.5%)
+    protocol_fee_usdc: MicroStr  # microUSDC string
+    total_to_escrow_usdc: MicroStr  # microUSDC string
 
 
 class BidRequest(BaseModel):

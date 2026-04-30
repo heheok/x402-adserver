@@ -11,12 +11,18 @@ import {
   solscanTxUrl,
   truncateAddress,
 } from "../lib/format";
+import { parseUsdc } from "../lib/money";
 import { useWalletTrack } from "../lib/walletTrack";
 import Icon from "./ui/Icon";
 import Solscan from "./ui/Solscan";
 
-type WalletInfo = { wallet_address: string; usdc_balance: number };
-type FaucetResponse = { amount: number; tx_hash: string };
+// Wire format: usdc_balance and amount are microUSDC strings (Session 16.9).
+// We parse to float USDC once at this boundary for the chip's UI delta math
+// (animating "+0.42 USDC inbound"). This is the ONE place float USDC is
+// allowed — it's a pure UX indicator, never compared against a campaign
+// budget. See worklog/session-16.9.md.
+type WalletInfo = { wallet_address: string; usdc_balance: string };
+type FaucetResponse = { amount: string; tx_hash: string };
 
 const LOW_BALANCE_THRESHOLD = 1; // USDC
 
@@ -63,22 +69,25 @@ export default function WalletChip() {
       return r.data;
     },
     onMutate: () => {
-      setBalanceBefore(wallet.data?.usdc_balance ?? 0);
+      setBalanceBefore(parseUsdc(wallet.data?.usdc_balance ?? "0"));
     },
     onSuccess: (data) => {
       setLastFaucetTx(data.tx_hash);
-      setPendingAmount(data.amount);
+      setPendingAmount(parseUsdc(data.amount));
       startPolling(20_000);
       qc.invalidateQueries({ queryKey: ["wallet"] });
     },
   });
 
-  // Clear the pending indicator when the new balance lands.
+  // Clear the pending indicator when the new balance lands. The 1e-6
+  // tolerance is a UI signal, not a money-correctness check — so float USDC
+  // is fine here.
   useEffect(() => {
     if (pendingAmount === null || balanceBefore === null) return;
     const current = wallet.data?.usdc_balance;
     if (current === undefined) return;
-    if (current >= balanceBefore + pendingAmount - 1e-6) {
+    const currentUsdc = parseUsdc(current);
+    if (currentUsdc >= balanceBefore + pendingAmount - 1e-6) {
       setPendingAmount(null);
       setBalanceBefore(null);
     }
@@ -145,7 +154,7 @@ export default function WalletChip() {
     );
   }
 
-  const balance = wallet.data?.usdc_balance ?? 0;
+  const balance = parseUsdc(wallet.data?.usdc_balance ?? "0");
   const isLow = wallet.data !== undefined && balance < LOW_BALANCE_THRESHOLD;
   const isPending = pendingAmount !== null;
   const accent = isLow ? "var(--st-paused)" : "var(--line-2)";

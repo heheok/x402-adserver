@@ -10,6 +10,7 @@ import {
 } from "../lib/aggregations";
 import { humanizeError } from "../lib/errors";
 import { truncateAddress } from "../lib/format";
+import { formatUsdc, sumMicro } from "../lib/money";
 import Icon from "../components/ui/Icon";
 import Solscan from "../components/ui/Solscan";
 import StatCard from "../components/ui/StatCard";
@@ -23,7 +24,7 @@ type ActivityRow = {
   campaign_id: string;
   campaign_name: string;
   publisher_wallet: string;
-  amount_usdc: number;
+  amount_usdc: string; // microUSDC string
   tx_hash: string | null;
   solscan_url: string | null;
   status: string;
@@ -86,7 +87,7 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
   });
 
   const rows = campaigns.data ?? [];
-  const totalSpent = rows.reduce((s, c) => s + c.spent, 0);
+  const totalSpentMicro = sumMicro(rows.map((c) => c.spent));
   const activeCount = rows.filter((c) => c.status === "active").length;
   const counts = byStatus(rows);
   const expiring = expiringSoon(rows, 3);
@@ -196,7 +197,7 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
           label="Total spent"
           value={
             <>
-              {totalSpent.toFixed(4)}{" "}
+              {formatUsdc(totalSpentMicro)}{" "}
               <span style={{ fontSize: 14, color: "var(--tx-2)" }}>USDC</span>
             </>
           }
@@ -390,7 +391,7 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
                 }}
               >
                 {s.status === "confirmed" ? "+" : ""}
-                {s.amount_usdc.toFixed(4)}{" "}
+                {formatUsdc(s.amount_usdc)}{" "}
                 <span style={{ color: "var(--tx-2)", fontSize: 10 }}>USDC</span>
               </span>
               <span style={{ textAlign: "right" }}>

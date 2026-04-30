@@ -19,9 +19,10 @@ from ..services.venues import get_venues_index
 router = APIRouter(tags=["rtb"])
 
 
-def _cost_per_play(cpm_price: float) -> float:
-    """CPM is the price per 1000 impressions."""
-    return float(cpm_price) / 1000.0
+def _cost_per_play_micro(cpm_price_micro: int) -> int:
+    """CPM is the price per 1000 impressions; cpm_price_micro stores
+    microUSDC per 1000 plays. Per-play cost is just floor-divided by 1000."""
+    return int(cpm_price_micro) // 1000
 
 
 def _pick_campaign(db: Session, dma_label: str) -> Campaign | None:
@@ -37,11 +38,9 @@ def _pick_campaign(db: Session, dma_label: str) -> Campaign | None:
     for stale schedules — periodic sweeps are an option but a per-bid pass
     keeps the list tight without a separate cron.
 
-    The `+ 1e-9` tolerance forgives float-addition drift — summing 0.001 many
-    times accumulates ~1e-16 of error per step, which can leave `remaining`
-    at 0.000999999… when the semantically-correct answer is "exactly one more
-    play is affordable." Without the tolerance the final play is rejected.
-    Production should track money as integer microUSDC, not float.
+    Session 16.9: budget guard is exact integer micro comparison. The
+    historical `+ 1e-9` tolerance was a band-aid for float-summing drift —
+    eliminated now that money is int micro.
     """
     today = datetime.now(timezone.utc).date()
     candidates = (
@@ -64,8 +63,8 @@ def _pick_campaign(db: Session, dma_label: str) -> Campaign | None:
             continue
         if not c.target_dmas or dma_label not in c.target_dmas:
             continue
-        remaining = float(c.budget) - float(c.spent)
-        if remaining + 1e-9 >= _cost_per_play(float(c.cpm_price)):
+        remaining_micro = int(c.budget) - int(c.spent)
+        if remaining_micro >= _cost_per_play_micro(int(c.cpm_price)):
             pick = c
     if flipped_any:
         db.commit()
@@ -85,7 +84,7 @@ def _build_proof_context(
         wallet_id=publisher_wallet,
         nonce=secrets.token_urlsafe(16),
         created_at=int(time.time()),
-        amount_usdc=_cost_per_play(float(campaign.cpm_price)),
+        amount_micro=_cost_per_play_micro(int(campaign.cpm_price)),
         device_id=device_id,
     )
     return encode_proof_context(
@@ -135,6 +134,11 @@ def bid(
     width = int(video.get("w", 1920))
     height = int(video.get("h", 1080))
 
+    # OpenRTB `price` is conventionally CPM in the request currency. We send
+    # the float USDC form here (display only — settlement uses int micro from
+    # the proof_context). Buy-side parsers expect a number, not a string.
+    cpm_usdc = int(campaign.cpm_price) / 1_000_000
+
     return BidResponse(
         id=body.id,
         cur="USD",
@@ -144,7 +148,7 @@ def bid(
                     {
                         "id": bid_id,
                         "impid": imp_id,
-                        "price": float(campaign.cpm_price),
+                        "price": cpm_usdc,
                         "adm": campaign.creative_url,
                         "crid": campaign.creative_id,
                         "w": width,

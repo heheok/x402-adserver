@@ -6,8 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from ..config import Settings, get_settings
 from ..dependencies import AdvertiserIdentity, require_advertiser
 from ..schemas import FaucetResponse, WalletInfo
+from ..services.money import micro_str, to_micro
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
-from ..services.solana import build_usdc_transfer_tx, get_usdc_balance
+from ..services.solana import build_usdc_transfer_tx, get_usdc_balance_micro
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,8 @@ async def get_wallet(
     privy: PrivyClient = Depends(get_privy_client),
 ) -> WalletInfo:
     address = await _resolve_advertiser_wallet(advertiser, privy)
-    balance = await get_usdc_balance(address)
-    return WalletInfo(wallet_address=address, usdc_balance=balance)
+    balance_micro = await get_usdc_balance_micro(address)
+    return WalletInfo(wallet_address=address, usdc_balance=micro_str(balance_micro))
 
 
 @router.post("/faucet", response_model=FaucetResponse)
@@ -52,11 +53,12 @@ async def faucet(
         )
 
     recipient = await _resolve_advertiser_wallet(advertiser, privy)
+    faucet_amount_micro = to_micro(settings.faucet_amount_usdc)
 
     tx_b64 = await build_usdc_transfer_tx(
         from_address=settings.treasury_wallet_address,
         to_address=recipient,
-        amount_usdc=settings.faucet_amount_usdc,
+        amount_micro=faucet_amount_micro,
     )
 
     # Each click is a separate logical transfer, so the reference_id needs a
@@ -74,4 +76,4 @@ async def faucet(
         logger.exception("faucet failed for advertiser=%s recipient=%s", advertiser.user_id, recipient)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
-    return FaucetResponse(amount=settings.faucet_amount_usdc, tx_hash=tx_hash)
+    return FaucetResponse(amount=micro_str(faucet_amount_micro), tx_hash=tx_hash)

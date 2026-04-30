@@ -15,7 +15,7 @@ from solana.rpc.async_api import AsyncClient  # noqa: E402
 from solders.pubkey import Pubkey  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
-from app.services.solana import get_usdc_balance  # noqa: E402
+from app.services.solana import get_usdc_balance_micro  # noqa: E402
 
 
 async def main() -> int:
@@ -32,10 +32,10 @@ async def main() -> int:
         sol_resp = await c.get_balance(Pubkey.from_string(address))
         sol = (sol_resp.value or 0) / 1_000_000_000
 
-    usdc = await get_usdc_balance(address)
+    usdc_micro = await get_usdc_balance_micro(address)
     print(f"address: {address}")
     print(f"SOL:     {sol:.6f}")
-    print(f"USDC:    {usdc:.6f}")
+    print(f"USDC:    {usdc_micro/1_000_000:.6f} ({usdc_micro} micro)")
     return 0
 
 

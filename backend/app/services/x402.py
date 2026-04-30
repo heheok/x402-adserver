@@ -33,19 +33,22 @@ class X402Error(RuntimeError):
 
 
 def build_payment_requirements(
-    amount_usdc: float,
+    amount_micro: int,
     pay_to_address: str,
     resource_url: str,
     description: str,
     fee_payer: str | None = None,
 ) -> dict[str, Any]:
-    """Build a PaymentRequirements object for inclusion in the 402 response body."""
+    """Build a PaymentRequirements object for inclusion in the 402 response body.
+
+    `amount_micro` is integer microUSDC (1 USDC = 1e6 micro). Goes on the wire
+    as `maxAmountRequired` in atomic-units string form, matching the x402 spec.
+    """
     settings = get_settings()
-    amount_raw = int(round(amount_usdc * (10 ** USDC_DECIMALS)))
     return {
         "scheme": "exact",
         "network": DEVNET_NETWORK,
-        "maxAmountRequired": str(amount_raw),
+        "maxAmountRequired": str(int(amount_micro)),
         "asset": settings.usdc_mint_devnet,
         "payTo": pay_to_address,
         "resource": resource_url,

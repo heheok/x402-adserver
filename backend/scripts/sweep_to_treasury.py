@@ -47,7 +47,7 @@ from app.services.privy import PrivyError, get_privy_client  # noqa: E402
 from app.services.solana import (  # noqa: E402
     build_sol_transfer_tx,
     build_usdc_transfer_tx,
-    get_usdc_balance,
+    get_usdc_balance_micro,
     wait_for_tx_confirmation,
 )
 
@@ -63,7 +63,7 @@ SOL_BUFFER_LAMPORTS = 1_000_000
 MIN_GAS_LAMPORTS = 50_000
 GAS_SEED_LAMPORTS = 1_000_000
 
-USDC_DUST_THRESHOLD = 1e-6  # 1 microUSDC — anything smaller is unsweepable
+USDC_DUST_THRESHOLD_MICRO = 1  # 1 microUSDC — anything smaller is unsweepable
 LAMPORTS_PER_SOL = 1_000_000_000
 
 
@@ -147,19 +147,22 @@ async def _sweep_one(
     treasury_wallet_id: str,
     *,
     execute: bool,
-) -> tuple[float, int]:
-    """Returns (usdc_swept, sol_lamports_swept)."""
-    usdc = await get_usdc_balance(w.address)
+) -> tuple[int, int]:
+    """Returns (usdc_micro_swept, sol_lamports_swept)."""
+    usdc_micro = await get_usdc_balance_micro(w.address)
     sol = await _get_sol_lamports(client, w.address)
 
-    print(f"  {w.role:<28} {_trunc(w.address):<18} USDC={usdc:>12.6f}  SOL={sol/LAMPORTS_PER_SOL:>10.6f}")
+    print(
+        f"  {w.role:<28} {_trunc(w.address):<18} USDC={usdc_micro/1_000_000:>12.6f}  "
+        f"SOL={sol/LAMPORTS_PER_SOL:>10.6f}"
+    )
 
-    usdc_swept = 0.0
+    usdc_micro_swept = 0
     sol_swept = 0
 
     # Gas-seed pass: if there's USDC to sweep but not enough SOL to pay the
     # transfer fee, treasury fronts a small amount first.
-    if usdc > USDC_DUST_THRESHOLD and sol < MIN_GAS_LAMPORTS:
+    if usdc_micro > USDC_DUST_THRESHOLD_MICRO and sol < MIN_GAS_LAMPORTS:
         if execute:
             try:
                 tx = await build_sol_transfer_tx(
@@ -183,32 +186,32 @@ async def _sweep_one(
             print(f"    → would seed {GAS_SEED_LAMPORTS/LAMPORTS_PER_SOL:.6f} SOL from treasury for gas")
 
     # USDC sweep
-    if usdc > USDC_DUST_THRESHOLD:
+    if usdc_micro > USDC_DUST_THRESHOLD_MICRO:
         if execute:
             try:
                 tx = await build_usdc_transfer_tx(
                     from_address=w.address,
                     to_address=treasury_address,
-                    amount_usdc=usdc,
+                    amount_micro=usdc_micro,
                     memo=f"sweep:{uuid4().hex[:8]}",
                 )
                 ref = f"sweep-usdc-{uuid4().hex[:8]}"
                 tx_hash = await privy.sign_and_send_solana(
                     wallet_id=w.wallet_id, transaction_base64=tx, reference_id=ref
                 )
-                print(f"    → USDC swept {usdc:.6f} tx={_trunc(tx_hash or '?')}")
+                print(f"    → USDC swept {usdc_micro/1_000_000:.6f} tx={_trunc(tx_hash or '?')}")
                 if tx_hash:
                     await wait_for_tx_confirmation(tx_hash, timeout_seconds=30)
-                usdc_swept = usdc
+                usdc_micro_swept = usdc_micro
             except (PrivyError, Exception) as exc:  # noqa: BLE001
                 print(f"    [FAIL] USDC sweep: {exc}")
         else:
-            print(f"    → would sweep USDC {usdc:.6f}")
-            usdc_swept = usdc
+            print(f"    → would sweep USDC {usdc_micro/1_000_000:.6f}")
+            usdc_micro_swept = usdc_micro
 
     # SOL sweep (after USDC, refresh balance to account for the USDC tx fee)
     sol_after_usdc = sol
-    if execute and usdc_swept > 0:
+    if execute and usdc_micro_swept > 0:
         sol_after_usdc = await _get_sol_lamports(client, w.address)
 
     sweep_lamports = max(0, sol_after_usdc - SOL_BUFFER_LAMPORTS)
@@ -236,7 +239,7 @@ async def _sweep_one(
             print(f"    → would sweep SOL {sweep_lamports/LAMPORTS_PER_SOL:.6f}")
             sol_swept = sweep_lamports
 
-    return usdc_swept, sol_swept
+    return usdc_micro_swept, sol_swept
 
 
 async def main() -> int:
@@ -269,10 +272,10 @@ async def main() -> int:
             print(f"  {'role':<28} {'address':<18} {'USDC':>14}     {'SOL':>14}")
             print(f"  {'-'*28} {'-'*18} {'-'*14}     {'-'*14}")
 
-            total_usdc = 0.0
+            total_usdc_micro = 0
             total_sol = 0
             for w in wallets:
-                usdc, sol = await _sweep_one(
+                usdc_micro, sol = await _sweep_one(
                     privy,
                     client,
                     w,
@@ -280,12 +283,12 @@ async def main() -> int:
                     settings.treasury_wallet_id,
                     execute=args.execute,
                 )
-                total_usdc += usdc
+                total_usdc_micro += usdc_micro
                 total_sol += sol
 
             print(
                 f"\n{'(would sweep)' if not args.execute else 'Swept'}: "
-                f"{total_usdc:.6f} USDC + {total_sol/LAMPORTS_PER_SOL:.6f} SOL"
+                f"{total_usdc_micro/1_000_000:.6f} USDC + {total_sol/LAMPORTS_PER_SOL:.6f} SOL"
             )
             if not args.execute:
                 print("\nRe-run with --execute to actually move funds.")

@@ -196,9 +196,12 @@ def _compensate_failed(db: Session, rows: list[Settlement]) -> None:
     only fires when we have positive evidence the tx will NEVER land
     (e.g. Privy raised at simulation). RPC blindness is NOT this path —
     that returns to pending.
+
+    Session 16.9: amount + budget arithmetic is exact integer micro. The
+    historical `+ 1e-9` epsilon is gone; comparisons are bit-exact.
     """
-    epsilon = 1e-9
     for r in rows:
+        amount_micro = int(r.amount_usdc)
         # Per-row compensating UPDATE on the campaign. Mirrors the shape
         # the old execute_settlement used: refund spent and flip
         # COMPLETED → ACTIVE if the refund creates room for one more play
@@ -207,15 +210,14 @@ def _compensate_failed(db: Session, rows: list[Settlement]) -> None:
             update(Campaign)
             .where(Campaign.id == r.campaign_id)
             .values(
-                spent=Campaign.spent - float(r.amount_usdc),
+                spent=Campaign.spent - amount_micro,
                 status=case(
                     (
                         (Campaign.status == CampaignStatus.COMPLETED.value)
                         & (
                             Campaign.budget
-                            - (Campaign.spent - float(r.amount_usdc))
-                            + epsilon
-                            >= Campaign.cpm_price / 1000.0
+                            - (Campaign.spent - amount_micro)
+                            >= Campaign.cpm_price / 1000
                         ),
                         CampaignStatus.ACTIVE.value,
                     ),
@@ -258,7 +260,8 @@ async def _flush_group(
         return (0, len(rows), 0, ["campaign not found"])
 
     publisher = rows[0].publisher_wallet
-    total_amount = sum(float(r.amount_usdc) for r in rows)
+    # All amounts are integer micro now — sum stays in micro.
+    total_amount_micro = sum(int(r.amount_usdc) for r in rows)
     first_nonce = rows[0].nonce
     row_ids = [r.id for r in rows]
 
@@ -274,7 +277,7 @@ async def _flush_group(
         tx_b64 = await build_usdc_transfer_tx(
             from_address=campaign.wallet_address,
             to_address=publisher,
-            amount_usdc=total_amount,
+            amount_micro=total_amount_micro,
             memo=memo,
         )
         tx_hash = await privy.sign_and_send_solana(
@@ -291,11 +294,11 @@ async def _flush_group(
             _mark_confirmed(db, row_ids, tx_hash)
             logger.info(
                 "batch flush confirmed campaign=%s publisher=%s rows=%d "
-                "amount=%.6f tx=%s",
+                "amount_micro=%d tx=%s",
                 campaign.id,
                 publisher,
                 len(rows),
-                total_amount,
+                total_amount_micro,
                 tx_hash,
             )
             return (len(rows), 0, 0, [])
@@ -373,10 +376,10 @@ async def _flush_group(
         # Truly definitive: simulation rejected, invalid wallet, malformed
         # tx, etc. Privy gave a clean refusal pre-broadcast. Compensate.
         logger.exception(
-            "batch flush DEFINITIVE failure campaign=%s rows=%d amount=%.6f",
+            "batch flush DEFINITIVE failure campaign=%s rows=%d amount_micro=%d",
             campaign.id,
             len(rows),
-            total_amount,
+            total_amount_micro,
         )
         _compensate_failed(db, rows)
         return (0, len(rows), 0, [str(e)])

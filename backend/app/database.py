@@ -63,7 +63,8 @@ _DEV_ADD_COLUMNS = {
         ("target_dmas", "TEXT"),
         ("start_date", "DATE"),
         ("end_date", "DATE"),
-        ("protocol_fee_amount", "NUMERIC(18, 6)"),
+        # Session 16.9: protocol_fee_amount stores integer microUSDC.
+        ("protocol_fee_amount", "BIGINT"),
         ("protocol_fee_tx_hash", "VARCHAR"),
     ],
     "settlements": [

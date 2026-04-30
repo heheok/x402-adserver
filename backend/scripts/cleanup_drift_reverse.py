@@ -39,7 +39,7 @@ from app.models import Campaign  # noqa: E402
 from app.services.privy import PrivyClient, PrivyError, get_privy_client  # noqa: E402
 from app.services.solana import (  # noqa: E402
     build_usdc_transfer_tx,
-    get_usdc_balance,
+    get_usdc_balance_micro,
     wait_for_tx_confirmation,
 )
 
@@ -72,10 +72,10 @@ async def main() -> int:
         print(f"[ABORT] couldn't resolve wallet_id for publisher {publisher}")
         return 1
 
-    publisher_balance = await get_usdc_balance(publisher)
+    publisher_balance_micro = await get_usdc_balance_micro(publisher)
     print(f"publisher: {publisher}")
     print(f"  wallet_id:        {publisher_wallet_id}")
-    print(f"  on-chain USDC:    {publisher_balance:.6f}")
+    print(f"  on-chain USDC:    {publisher_balance_micro/1_000_000:.6f}")
     print()
 
     # Compute per-campaign drift from DB vs on-chain. Only target campaigns
@@ -87,38 +87,38 @@ async def main() -> int:
         .all()
     )
 
-    transfers: list[tuple[Campaign, float]] = []
+    transfers: list[tuple[Campaign, int]] = []
     for c in candidates:
-        on_chain = await get_usdc_balance(c.wallet_address)
-        db_remaining = float(c.budget) - float(c.spent)
+        on_chain_micro = await get_usdc_balance_micro(c.wallet_address)
+        db_remaining_micro = int(c.budget) - int(c.spent)
         # Match the audit's expected calculation: include unpaid protocol
         # fee. Without this, a campaign with an unpaid fee can hide
         # settlement drift behind the still-in-wallet fee USDC.
-        unpaid_fee = (
-            float(c.protocol_fee_amount or 0) if not c.protocol_fee_tx_hash else 0.0
+        unpaid_fee_micro = (
+            int(c.protocol_fee_amount or 0) if not c.protocol_fee_tx_hash else 0
         )
-        expected = db_remaining + unpaid_fee
-        drift = expected - on_chain  # positive = campaign short
-        if drift > 1e-6:
-            transfers.append((c, drift))
+        expected_micro = db_remaining_micro + unpaid_fee_micro
+        drift_micro = expected_micro - on_chain_micro  # positive = campaign short
+        if drift_micro > 0:
+            transfers.append((c, drift_micro))
             print(f"campaign {c.id[:8]}  status={c.status}")
-            print(f"  budget - spent (DB):  {db_remaining:.6f}")
-            if unpaid_fee > 0:
-                print(f"  unpaid protocol fee:  +{unpaid_fee:.6f}")
-            print(f"  expected on-chain:    {expected:.6f}")
-            print(f"  on-chain:             {on_chain:.6f}")
-            print(f"  needs:                +{drift:.6f}")
+            print(f"  budget - spent (DB):  {db_remaining_micro/1_000_000:.6f}")
+            if unpaid_fee_micro > 0:
+                print(f"  unpaid protocol fee:  +{unpaid_fee_micro/1_000_000:.6f}")
+            print(f"  expected on-chain:    {expected_micro/1_000_000:.6f}")
+            print(f"  on-chain:             {on_chain_micro/1_000_000:.6f}")
+            print(f"  needs:                +{drift_micro/1_000_000:.6f}")
             print()
 
     if not transfers:
         print("no campaigns short of DB-expected. nothing to do.")
         return 0
 
-    total_needed = sum(amt for _, amt in transfers)
-    print(f"total to transfer publisher → campaigns: {total_needed:.6f} USDC")
-    print(f"publisher has: {publisher_balance:.6f} USDC")
-    if total_needed > publisher_balance + 1e-6:
-        print(f"[ABORT] publisher doesn't hold enough USDC")
+    total_needed_micro = sum(amt for _, amt in transfers)
+    print(f"total to transfer publisher → campaigns: {total_needed_micro/1_000_000:.6f} USDC")
+    print(f"publisher has: {publisher_balance_micro/1_000_000:.6f} USDC")
+    if total_needed_micro > publisher_balance_micro:
+        print("[ABORT] publisher doesn't hold enough USDC")
         return 2
 
     if not args.execute:
@@ -126,12 +126,12 @@ async def main() -> int:
         return 0
 
     print()
-    for c, amount in transfers:
+    for c, amount_micro in transfers:
         try:
             tx_b64 = await build_usdc_transfer_tx(
                 from_address=publisher,
                 to_address=c.wallet_address,
-                amount_usdc=amount,
+                amount_micro=amount_micro,
                 memo=f"drift-rev:{uuid4().hex[:8]}",
             )
             tx_hash = await privy.sign_and_send_solana(
@@ -139,7 +139,7 @@ async def main() -> int:
                 transaction_base64=tx_b64,
                 reference_id=f"drift-rev-{c.id[:8]}-{uuid4().hex[:6]}",
             )
-            print(f"  {c.id[:8]}  +{amount:.6f}  tx={tx_hash}")
+            print(f"  {c.id[:8]}  +{amount_micro/1_000_000:.6f}  tx={tx_hash}")
             confirmed = await wait_for_tx_confirmation(tx_hash, timeout_seconds=30)
             print(f"             confirmed={confirmed}")
         except (PrivyError, Exception) as e:  # noqa: BLE001

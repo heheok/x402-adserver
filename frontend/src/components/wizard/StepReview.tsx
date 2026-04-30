@@ -8,6 +8,7 @@ import { createX402Client } from "x402-solana/client";
 import { useApi } from "../../lib/api";
 import { humanizeError } from "../../lib/errors";
 import { solscanTxUrl, truncateAddress } from "../../lib/format";
+import { cmpMicro, formatUsdc } from "../../lib/money";
 import { useWalletTrack } from "../../lib/walletTrack";
 import Icon from "../ui/Icon";
 import Solscan from "../ui/Solscan";
@@ -17,17 +18,17 @@ import type { Quote } from "./StepCalculator";
 import type { ScheduleWindow } from "./StepSchedule";
 import type { TargetingSelection } from "./StepTargeting";
 
-type WalletInfo = { wallet_address: string; usdc_balance: number };
+type WalletInfo = { wallet_address: string; usdc_balance: string };
 
 type CampaignSummary = {
   id: string;
   name: string;
   status: string;
-  budget: number;
-  spent: number;
-  remaining: number;
+  budget: string;
+  spent: string;
+  remaining: string;
   wallet_address: string;
-  protocol_fee_amount?: number | null;
+  protocol_fee_amount?: string | null;
   protocol_fee_tx_hash?: string | null;
   protocol_fee_solscan_url?: string | null;
 };
@@ -49,10 +50,6 @@ type Props = {
   onDone?: (campaign: CreatedCampaign) => void;
   onFundingStateChange?: (busy: boolean) => void;
 };
-
-function fmtUsdc(n: number): string {
-  return n.toFixed(2);
-}
 
 export default function StepReview({
   creative,
@@ -118,7 +115,9 @@ export default function StepReview({
       const client = createX402Client({
         wallet: wallets[0],
         network: "solana-devnet",
-        amount: BigInt(Math.ceil(quote.total_to_escrow_usdc * 1.05 * 1e6)),
+        // Session 16.9: amount is exact integer micro from the server quote.
+        // The historical *1.05 slack was a float-drift safety margin; gone now.
+        amount: BigInt(quote.total_to_escrow_usdc),
         customFetch: instrumentedFetch,
       });
 
@@ -181,9 +180,10 @@ export default function StepReview({
     },
   });
 
-  const balance = wallet.data?.usdc_balance ?? 0;
+  const balanceMicro = wallet.data?.usdc_balance ?? "0";
   const insufficient =
-    wallet.data !== undefined && quote.total_to_escrow_usdc > balance + 1e-9;
+    wallet.data !== undefined &&
+    cmpMicro(quote.total_to_escrow_usdc, balanceMicro) > 0;
   const canSubmit =
     !submit.isPending &&
     wallets.length > 0 &&
@@ -230,7 +230,7 @@ export default function StepReview({
               fontFamily: "var(--font-mono)",
             }}
           >
-            {fmtUsdc(quote.total_to_escrow_usdc)} USDC escrowed · campaign
+            {formatUsdc(quote.total_to_escrow_usdc, 2)} USDC escrowed · campaign
             wallet {truncateAddress(result.wallet_address, 4)}
           </div>
 
@@ -399,18 +399,18 @@ export default function StepReview({
           />
           <ReviewRow
             label="CPM"
-            value={`${quote.cpm_price.toFixed(2)} USDC`}
+            value={`${formatUsdc(quote.cpm_price, 2)} USDC`}
             mono
           />
           <ReviewRow
             label={`Protocol fee · ${(quote.protocol_fee_pct * 100).toFixed(1)}%`}
-            value={`${fmtUsdc(quote.protocol_fee_usdc)} USDC`}
+            value={`${formatUsdc(quote.protocol_fee_usdc, 2)} USDC`}
             mono
             muted
           />
           <ReviewRow
             label="Total to escrow"
-            value={`${fmtUsdc(quote.total_to_escrow_usdc)} USDC`}
+            value={`${formatUsdc(quote.total_to_escrow_usdc, 2)} USDC`}
             highlight
           />
         </div>
@@ -453,9 +453,9 @@ export default function StepReview({
               fontFamily: "var(--font-mono)",
             }}
           >
-            Total to escrow {fmtUsdc(quote.total_to_escrow_usdc)} USDC exceeds
-            your wallet balance of {fmtUsdc(balance)} USDC. Hit "Get test USDC"
-            first.
+            Total to escrow {formatUsdc(quote.total_to_escrow_usdc, 2)} USDC
+            exceeds your wallet balance of {formatUsdc(balanceMicro, 2)} USDC.
+            Hit "Get test USDC" first.
           </p>
         )}
         {submit.isError && (

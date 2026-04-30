@@ -36,7 +36,7 @@ from app.models import Campaign, Settlement, SettlementStatus  # noqa: E402
 from app.services.privy import PrivyError, get_privy_client  # noqa: E402
 from app.services.solana import (  # noqa: E402
     build_usdc_transfer_tx,
-    get_usdc_balance,
+    get_usdc_balance_micro,
     wait_for_tx_confirmation,
 )
 
@@ -60,8 +60,9 @@ async def main() -> int:
         print(f"campaign {args.campaign} not found")
         return 1
 
-    # Total expected to publisher across ALL campaigns (aggregate audit shape)
-    total_expected_to_publisher = float(
+    # Total expected to publisher across ALL campaigns (aggregate audit shape).
+    # Session 16.9: amount_usdc is integer micro.
+    total_expected_to_publisher_micro = int(
         db.query(func.coalesce(func.sum(Settlement.amount_usdc), 0))
         .filter(
             Settlement.status == SettlementStatus.CONFIRMED.value,
@@ -70,41 +71,40 @@ async def main() -> int:
         .scalar()
     )
 
-    on_chain_publisher = await get_usdc_balance(settings.demo_publisher_wallet)
-    on_chain_campaign = await get_usdc_balance(c.wallet_address)
-    db_remaining = float(c.budget) - float(c.spent)
-    drift = on_chain_campaign - db_remaining
-    publisher_short = total_expected_to_publisher - on_chain_publisher
+    on_chain_publisher_micro = await get_usdc_balance_micro(settings.demo_publisher_wallet)
+    on_chain_campaign_micro = await get_usdc_balance_micro(c.wallet_address)
+    db_remaining_micro = int(c.budget) - int(c.spent)
+    drift_micro = on_chain_campaign_micro - db_remaining_micro
+    publisher_short_micro = total_expected_to_publisher_micro - on_chain_publisher_micro
 
     print(f"campaign:           {c.id}")
     print(f"  status:           {c.status}")
-    print(f"  budget - spent:   {db_remaining:.6f}  (DB-expected on-chain)")
-    print(f"  actual on-chain:  {on_chain_campaign:.6f}")
-    print(f"  drift:            {drift:+.6f}  (this is what's stranded)")
+    print(f"  budget - spent:   {db_remaining_micro/1_000_000:.6f}  (DB-expected on-chain)")
+    print(f"  actual on-chain:  {on_chain_campaign_micro/1_000_000:.6f}")
+    print(f"  drift:            {drift_micro/1_000_000:+.6f}  (this is what's stranded)")
     print()
-    print(f"publisher (demo, AGGREGATE across all campaigns):")
-    print(f"  expected from DB: {total_expected_to_publisher:.6f}")
-    print(f"  actual on-chain:  {on_chain_publisher:.6f}")
-    print(f"  publisher SHORT:  {publisher_short:+.6f}")
+    print("publisher (demo, AGGREGATE across all campaigns):")
+    print(f"  expected from DB: {total_expected_to_publisher_micro/1_000_000:.6f}")
+    print(f"  actual on-chain:  {on_chain_publisher_micro/1_000_000:.6f}")
+    print(f"  publisher SHORT:  {publisher_short_micro/1_000_000:+.6f}")
 
-    if drift <= 1e-9:
+    if drift_micro <= 0:
         print("\nno drift to clean up.")
         return 0
 
     # Sanity: the campaign's drift should be ≤ the aggregate publisher SHORT.
-    # (The campaign's missing payments are a subset of all missing payments.)
     # If campaign drift > publisher short, something else is stranded here
     # (e.g., orphaned protocol fee — different bug, different fix path).
-    if drift - publisher_short > 1e-3:
+    if drift_micro - publisher_short_micro > 1_000:  # > 0.001 USDC
         print(
-            f"\n[ABORT] campaign drift ({drift:+.6f}) exceeds publisher SHORT "
-            f"({publisher_short:+.6f}); the extra is from a different cause "
+            f"\n[ABORT] campaign drift ({drift_micro/1_000_000:+.6f}) exceeds publisher SHORT "
+            f"({publisher_short_micro/1_000_000:+.6f}); the extra is from a different cause "
             f"(e.g. orphaned protocol fee). Investigate before transferring."
         )
         return 2
 
     print(
-        f"\nproposed action: transfer {drift:.6f} USDC from campaign → publisher\n"
+        f"\nproposed action: transfer {drift_micro/1_000_000:.6f} USDC from campaign → publisher\n"
         f"  this reconciles DB-says-paid against on-chain-paid for this campaign."
     )
 
@@ -116,7 +116,7 @@ async def main() -> int:
         tx_b64 = await build_usdc_transfer_tx(
             from_address=c.wallet_address,
             to_address=settings.demo_publisher_wallet,
-            amount_usdc=drift,
+            amount_micro=drift_micro,
             memo=f"drift-cleanup:{uuid4().hex[:8]}",
         )
         tx_hash = await privy.sign_and_send_solana(

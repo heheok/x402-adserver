@@ -30,12 +30,12 @@ from app.models import Campaign, CampaignStatus  # noqa: E402
 from app.services.privy import PrivyError, get_privy_client  # noqa: E402
 from app.services.solana import (  # noqa: E402
     build_usdc_transfer_tx,
-    get_usdc_balance,
+    get_usdc_balance_micro,
     wait_for_tx_confirmation,
 )
 
 
-PROBE_AMOUNT_USDC = 0.0005
+PROBE_AMOUNT_MICRO = 500  # 0.0005 USDC
 
 
 async def _sol_lamports(client: AsyncClient, address: str) -> int:
@@ -78,23 +78,23 @@ async def main() -> int:
     async with AsyncClient(settings.solana_rpc_url) as client:
         # Snapshot pre-state
         sol_pre = await _sol_lamports(client, c.wallet_address)
-        usdc_pre_src = await get_usdc_balance(c.wallet_address)
-        usdc_pre_dst = await get_usdc_balance(settings.demo_publisher_wallet)
+        usdc_pre_src_micro = await get_usdc_balance_micro(c.wallet_address)
+        usdc_pre_dst_micro = await get_usdc_balance_micro(settings.demo_publisher_wallet)
         print(
             f"\nPRE:\n"
-            f"  campaign  SOL={sol_pre/1e9:.9f}  USDC={usdc_pre_src:.6f}\n"
-            f"  publisher                       USDC={usdc_pre_dst:.6f}"
+            f"  campaign  SOL={sol_pre/1e9:.9f}  USDC={usdc_pre_src_micro/1_000_000:.6f}\n"
+            f"  publisher                       USDC={usdc_pre_dst_micro/1_000_000:.6f}"
         )
 
-        if usdc_pre_src < PROBE_AMOUNT_USDC:
-            print(f"\ncampaign wallet has < {PROBE_AMOUNT_USDC} USDC; pick another")
+        if usdc_pre_src_micro < PROBE_AMOUNT_MICRO:
+            print(f"\ncampaign wallet has < {PROBE_AMOUNT_MICRO/1_000_000} USDC; pick another")
             return 1
 
         # Build + send WITH sponsor=True
         tx_b64 = await build_usdc_transfer_tx(
             from_address=c.wallet_address,
             to_address=settings.demo_publisher_wallet,
-            amount_usdc=PROBE_AMOUNT_USDC,
+            amount_micro=PROBE_AMOUNT_MICRO,
             memo=f"sponsor-probe:{uuid4().hex[:8]}",
         )
 
@@ -122,26 +122,34 @@ async def main() -> int:
 
         # Snapshot post-state
         sol_post = await _sol_lamports(client, c.wallet_address)
-        usdc_post_src = await get_usdc_balance(c.wallet_address)
-        usdc_post_dst = await get_usdc_balance(settings.demo_publisher_wallet)
+        usdc_post_src_micro = await get_usdc_balance_micro(c.wallet_address)
+        usdc_post_dst_micro = await get_usdc_balance_micro(settings.demo_publisher_wallet)
 
         sol_delta = sol_post - sol_pre
-        usdc_src_delta = usdc_post_src - usdc_pre_src
-        usdc_dst_delta = usdc_post_dst - usdc_pre_dst
+        usdc_src_delta = usdc_post_src_micro - usdc_pre_src_micro
+        usdc_dst_delta = usdc_post_dst_micro - usdc_pre_dst_micro
 
         print(
             f"\nPOST:\n"
-            f"  campaign  SOL={sol_post/1e9:.9f} (Δ={sol_delta:+d} lamports)  USDC={usdc_post_src:.6f} (Δ={usdc_src_delta:+.6f})\n"
-            f"  publisher                                                       USDC={usdc_post_dst:.6f} (Δ={usdc_dst_delta:+.6f})"
+            f"  campaign  SOL={sol_post/1e9:.9f} (Δ={sol_delta:+d} lamports)  "
+            f"USDC={usdc_post_src_micro/1_000_000:.6f} (Δ={usdc_src_delta/1_000_000:+.6f})\n"
+            f"  publisher                                                       "
+            f"USDC={usdc_post_dst_micro/1_000_000:.6f} (Δ={usdc_dst_delta/1_000_000:+.6f})"
         )
 
-        # Verdict
+        # Verdict — exact integer-micro comparison.
         print("\n=== VERDICT ===")
-        if abs(usdc_src_delta + PROBE_AMOUNT_USDC) > 1e-9:
-            print(f"❌  campaign USDC delta unexpected ({usdc_src_delta:+.6f}, expected {-PROBE_AMOUNT_USDC:+.6f})")
+        if usdc_src_delta != -PROBE_AMOUNT_MICRO:
+            print(
+                f"❌  campaign USDC delta unexpected ({usdc_src_delta/1_000_000:+.6f}, "
+                f"expected {-PROBE_AMOUNT_MICRO/1_000_000:+.6f})"
+            )
             return 3
-        if abs(usdc_dst_delta - PROBE_AMOUNT_USDC) > 1e-9:
-            print(f"❌  publisher USDC delta unexpected ({usdc_dst_delta:+.6f}, expected {+PROBE_AMOUNT_USDC:+.6f})")
+        if usdc_dst_delta != PROBE_AMOUNT_MICRO:
+            print(
+                f"❌  publisher USDC delta unexpected ({usdc_dst_delta/1_000_000:+.6f}, "
+                f"expected {+PROBE_AMOUNT_MICRO/1_000_000:+.6f})"
+            )
             return 3
         if sol_delta == 0:
             print(f"✅  USDC moved correctly AND campaign wallet's SOL is unchanged.")

@@ -1,15 +1,19 @@
+// Session 16.9: every money field on the wire is an integer-microUSDC string
+// (e.g. "422000" = $0.422). 1 USDC = 1_000_000 microUSDC. See lib/money.ts
+// for parse/format/sum helpers — never do raw arithmetic on these strings
+// (use BigInt or sumMicro/subMicro).
 export type CampaignRow = {
   id: string;
   name: string;
   status: string;
-  budget: number;
-  spent: number;
-  remaining: number;
+  budget: string; // microUSDC string
+  spent: string;
+  remaining: string;
   wallet_address: string;
   target_dmas?: string[] | null;
   start_date?: string | null;
   end_date?: string | null;
-  protocol_fee_amount?: number | null;
+  protocol_fee_amount?: string | null;
   protocol_fee_tx_hash?: string | null;
   protocol_fee_solscan_url?: string | null;
 };
@@ -18,7 +22,7 @@ export type SettlementRow = {
   id: string;
   nonce: string;
   publisher_wallet: string;
-  amount_usdc: number;
+  amount_usdc: string; // microUSDC string
   tx_hash: string | null;
   solscan_url: string | null;
   status: string;
@@ -35,7 +39,7 @@ export type StatsRow = {
   total_plays: number;
   last_24h_plays: number;
   pending_plays?: number;
-  total_confirmed_usdc: number;
+  total_confirmed_usdc: string; // microUSDC string
   plays_by_dma?: Record<string, number>;
   recent_settlements: SettlementRow[];
 };

@@ -7,9 +7,10 @@ Three sections:
 
   1. Publisher reconciliation
      For every publisher_wallet that's received at least one confirmed
-     settlement: sum of `amount_usdc` (DB) vs `get_usdc_balance` (on-chain).
+     settlement: sum of `amount_usdc` (DB, microUSDC) vs on-chain USDC token
+     balance (atomic units).
      SHORT  = on-chain < DB        → bug (we owe / settlement got lost)
-     OK     = on-chain == DB       → green
+     OK     = on-chain == DB       → exact match
      MORE   = on-chain > DB        → ignore on devnet for our test publisher,
                                       expected for real publishers
 
@@ -21,13 +22,11 @@ Three sections:
        REFUNDED    → 0 (+ protocol_fee_amount if fee was orphaned —
                         BACKEND-REVIEW.md §1.1: refund only sends
                         budget - spent, leaks orphaned fee permanently)
-     DRIFT lines on REFUNDED rows quantify §1.1's leak in dollars.
+     DRIFT lines on REFUNDED rows quantify §1.1's leak in micro.
 
-  3. Service wallet balances
-     Treasury, protocol revenue, helpers, demo publisher — just print SOL +
-     USDC for orientation. No expected vs actual; treasuries fluctuate.
+  3. Service wallets — orientation only.
 
-Tolerance: 1e-6 USDC (= 1 microUSDC, the smallest possible on-chain unit).
+Session 16.9: every comparison is exact integer microUSDC. No tolerance.
 """
 
 from __future__ import annotations
@@ -44,11 +43,14 @@ from sqlalchemy import func  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models import Campaign, CampaignStatus, Settlement, SettlementStatus  # noqa: E402
-from app.services.solana import get_usdc_balance  # noqa: E402
+from app.services.solana import get_usdc_balance_micro  # noqa: E402
 
 
-USDC_TOLERANCE = 1e-6
-CAMPAIGN_TOLERANCE = 1e-3  # campaign wallets carry a few cents of dust from float math
+def _fmt_micro(micro: int) -> str:
+    """Format micro as USDC with 6dp for display (audit precision)."""
+    sign = "-" if micro < 0 else ""
+    a = abs(int(micro))
+    return f"{sign}{a // 1_000_000}.{a % 1_000_000:06d}"
 
 
 def _trunc(addr: str, n: int = 6) -> str:
@@ -84,19 +86,21 @@ async def _section_publishers(db) -> None:
     print(f"  {'wallet':<20} {'plays':>6} {'expected':>14} {'actual':>14} {'diff':>14}  flag")
     print(f"  {'-'*20} {'-'*6} {'-'*14} {'-'*14} {'-'*14}  {'-'*5}")
     short_count = 0
-    for wallet, expected, n in rows:
-        expected = float(expected)
-        actual = await get_usdc_balance(wallet)
+    for wallet, expected_micro, n in rows:
+        expected = int(expected_micro)
+        actual = await get_usdc_balance_micro(wallet)
         diff = actual - expected
-        if diff < -USDC_TOLERANCE:
+        if diff < 0:
             flag = "SHORT"
             short_count += 1
-        elif abs(diff) <= USDC_TOLERANCE:
+        elif diff == 0:
             flag = "OK"
         else:
             flag = "MORE"  # other inflows; not a bug
         print(
-            f"  {_trunc(wallet, 14):<20} {n:>6} {expected:>14.6f} {actual:>14.6f} {diff:>+14.6f}  {flag}"
+            f"  {_trunc(wallet, 14):<20} {n:>6} "
+            f"{_fmt_micro(expected):>14} {_fmt_micro(actual):>14} "
+            f"{('+' if diff >= 0 else '') + _fmt_micro(diff):>14}  {flag}"
         )
 
     if short_count:
@@ -134,8 +138,8 @@ async def _section_campaigns(db) -> None:
         .group_by(Settlement.campaign_id)
         .all()
     )
-    pending_by_campaign: dict[str, tuple[int, float]] = {
-        cid: (int(n), float(amt)) for cid, n, amt in pending_rows
+    pending_by_campaign: dict[str, tuple[int, int]] = {
+        cid: (int(n), int(amt)) for cid, n, amt in pending_rows
     }
 
     print(
@@ -143,64 +147,78 @@ async def _section_campaigns(db) -> None:
     )
     print(f"  {'-'*32} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*9}  {'-'*9}")
 
-    drift_total = 0.0
-    in_flight_total = 0.0
-    refunded_orphaned_fee = 0.0
-    refunded_stranded_total = 0.0
+    drift_total_micro = 0
+    in_flight_total_micro = 0
+    refunded_orphaned_fee_micro = 0
+    refunded_stranded_total_micro = 0
 
     for c in campaigns:
         if not c.wallet_address:
             continue
-        budget = float(c.budget or 0)
-        spent = float(c.spent or 0)
-        fee = float(c.protocol_fee_amount or 0)
+        budget = int(c.budget or 0)
+        spent = int(c.spent or 0)
+        fee = int(c.protocol_fee_amount or 0)
         fee_paid = bool(c.protocol_fee_tx_hash)
-        pending_n, pending_amt = pending_by_campaign.get(c.id, (0, 0.0))
+        pending_n, pending_amt_micro = pending_by_campaign.get(c.id, (0, 0))
 
         if c.status == CampaignStatus.DRAFT.value:
-            expected = 0.0
+            expected = 0
         elif c.status == CampaignStatus.REFUNDED.value:
             # Refund only sends `budget - spent`; orphaned fee stays put.
-            expected = fee if not fee_paid else 0.0
+            expected = fee if not fee_paid else 0
         else:
             # active / paused / completed / expired — funded, possibly mid-flight.
-            expected = (budget - spent) + (fee if not fee_paid else 0.0)
+            expected = (budget - spent) + (fee if not fee_paid else 0)
 
-        actual = await get_usdc_balance(c.wallet_address)
+        actual = await get_usdc_balance_micro(c.wallet_address)
         diff = actual - expected
 
-        # IN-FLIGHT: actual is HIGH by ~pending_amt — those settlements are
-        # queued but the on-chain transfer hasn't fired yet. Tolerance is
-        # the campaign tolerance, applied to the post-flush expected (i.e.
-        # diff - pending_amt should be ~0).
-        post_flush_diff = diff - pending_amt
-        if abs(diff) <= CAMPAIGN_TOLERANCE:
+        # IN-FLIGHT: actual is HIGH by exactly pending_amt_micro.
+        post_flush_diff = diff - pending_amt_micro
+        if diff == 0:
             flag = "OK"
-        elif pending_n > 0 and abs(post_flush_diff) <= CAMPAIGN_TOLERANCE:
+        elif pending_n > 0 and post_flush_diff == 0:
             flag = "IN-FLIGHT"
-            in_flight_total += pending_amt
+            in_flight_total_micro += pending_amt_micro
         else:
             flag = "DRIFT"
-            drift_total += abs(diff)
+            drift_total_micro += abs(diff)
 
         if c.status == CampaignStatus.REFUNDED.value:
-            refunded_stranded_total += actual
+            refunded_stranded_total_micro += actual
             if not fee_paid:
-                refunded_orphaned_fee += fee
+                refunded_orphaned_fee_micro += fee
 
-        pending_str = f"{pending_n}/{pending_amt:.4f}" if pending_n else "—"
+        pending_str = (
+            f"{pending_n}/{_fmt_micro(pending_amt_micro)[:6]}" if pending_n else "—"
+        )
         print(
-            f"  {c.id[:32]:<32} {c.status:<10} {expected:>10.4f} {actual:>10.4f} {diff:>+10.4f} {pending_str:>9}  {flag}"
+            f"  {c.id[:32]:<32} {c.status:<10} "
+            f"{_fmt_micro(expected)[:10]:>10} {_fmt_micro(actual)[:10]:>10} "
+            f"{(('+' if diff >= 0 else '') + _fmt_micro(diff))[:10]:>10} "
+            f"{pending_str:>9}  {flag}"
         )
 
     print()
-    print(f"  Refunded campaigns — total stranded USDC on-chain: {refunded_stranded_total:.4f}")
-    print(f"  Of that, declared orphaned fee (BACKEND-REVIEW §1.1): {refunded_orphaned_fee:.4f}")
-    if in_flight_total > 0:
-        print(f"  ⏳ in-flight (queued, not yet on-chain): {in_flight_total:.4f} USDC")
-    if drift_total > 0:
-        print(f"  ⚠  cumulative |drift| across DRIFT rows: {drift_total:.4f} USDC")
-    elif in_flight_total == 0:
+    print(
+        f"  Refunded campaigns — total stranded USDC on-chain: "
+        f"{_fmt_micro(refunded_stranded_total_micro)}"
+    )
+    print(
+        f"  Of that, declared orphaned fee (BACKEND-REVIEW §1.1): "
+        f"{_fmt_micro(refunded_orphaned_fee_micro)}"
+    )
+    if in_flight_total_micro > 0:
+        print(
+            f"  ⏳ in-flight (queued, not yet on-chain): "
+            f"{_fmt_micro(in_flight_total_micro)} USDC"
+        )
+    if drift_total_micro > 0:
+        print(
+            f"  ⚠  cumulative |drift| across DRIFT rows: "
+            f"{_fmt_micro(drift_total_micro)} USDC"
+        )
+    elif in_flight_total_micro == 0:
         print("  ✓ no DRIFT rows (every campaign matches expected).")
 
 
@@ -227,11 +245,14 @@ async def _section_service_wallets(client: AsyncClient) -> None:
     print(f"  {'role':<18} {'address':<22} {'SOL':>14} {'USDC':>14}")
     print(f"  {'-'*18} {'-'*22} {'-'*14} {'-'*14}")
     for role, address in targets:
-        sol, usdc = await asyncio.gather(
+        sol, usdc_micro = await asyncio.gather(
             _get_sol_balance(client, address),
-            get_usdc_balance(address),
+            get_usdc_balance_micro(address),
         )
-        print(f"  {role:<18} {_trunc(address, 16):<22} {sol:>14.6f} {usdc:>14.6f}")
+        print(
+            f"  {role:<18} {_trunc(address, 16):<22} "
+            f"{sol:>14.6f} {_fmt_micro(usdc_micro):>14}"
+        )
 
 
 async def main() -> int:

@@ -26,6 +26,7 @@ from ..schemas import (
 )
 from ..services import x402 as x402_service
 from ..services.calc import CalcError, compute_quote, required_sol_seed_lamports
+from ..services.money import micro_str
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
 from ..services.solana import (
     build_campaign_bootstrap_tx,
@@ -52,20 +53,24 @@ def _solscan_tx_url(tx_hash: str | None) -> str | None:
 
 
 def _to_summary(c: Campaign) -> CampaignSummary:
+    budget_micro = int(c.budget)
+    spent_micro = int(c.spent)
     return CampaignSummary(
         id=c.id,
         name=c.name,
         status=c.status,
-        budget=float(c.budget),
-        spent=float(c.spent),
-        remaining=float(c.budget) - float(c.spent),
+        budget=micro_str(budget_micro),
+        spent=micro_str(spent_micro),
+        remaining=micro_str(budget_micro - spent_micro),
         wallet_address=c.wallet_address,
         target_dmas=c.target_dmas,
         start_date=c.start_date,
         end_date=c.end_date,
-        protocol_fee_amount=float(c.protocol_fee_amount)
-        if c.protocol_fee_amount is not None
-        else None,
+        protocol_fee_amount=(
+            micro_str(int(c.protocol_fee_amount))
+            if c.protocol_fee_amount is not None
+            else None
+        ),
         protocol_fee_tx_hash=c.protocol_fee_tx_hash,
         protocol_fee_solscan_url=_solscan_tx_url(c.protocol_fee_tx_hash),
     )
@@ -86,7 +91,7 @@ def _to_settlement_summary(s: Settlement) -> SettlementSummary:
         id=s.id,
         nonce=s.nonce,
         publisher_wallet=s.publisher_wallet,
-        amount_usdc=float(s.amount_usdc),
+        amount_usdc=micro_str(int(s.amount_usdc)),
         tx_hash=s.tx_hash,
         solscan_url=_solscan_tx_url(s.tx_hash),
         status=s.status,
@@ -136,12 +141,26 @@ def quote_campaign(
     Server-derived breakdown — clients can't tamper with the budget. The same
     `compute_quote` runs on POST /api/campaigns to determine the actual escrow
     amount (so the dashboard's preview always matches what gets charged).
+
+    Session 16.9: Quote internals are int micro; wire fields are micro strings
+    under their legacy names (cpm_price / total_usdc / protocol_fee_usdc /
+    total_to_escrow_usdc) so frontend type changes stay diff-mechanical.
     """
     try:
         q = compute_quote(body.target_dmas, body.start_date, body.end_date)
     except CalcError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    return QuoteResponse(**q.__dict__)
+    return QuoteResponse(
+        screens=q.screens,
+        plays_per_screen_per_day=q.plays_per_screen_per_day,
+        days=q.days,
+        total_plays=q.total_plays,
+        cpm_price=micro_str(q.cpm_price_micro),
+        total_usdc=micro_str(q.total_micro),
+        protocol_fee_pct=q.protocol_fee_pct,
+        protocol_fee_usdc=micro_str(q.protocol_fee_micro),
+        total_to_escrow_usdc=micro_str(q.total_to_escrow_micro),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +256,9 @@ async def create_campaign(
             name=body.name,
             creative_url=body.creative_url,
             creative_id=body.creative_id,
-            cpm_price=quote.cpm_price,
-            budget=quote.total_usdc,
-            spent=0.0,
+            cpm_price=quote.cpm_price_micro,
+            budget=quote.total_micro,
+            spent=0,
             status=CampaignStatus.DRAFT.value,
             wallet_id=wallet["id"],
             wallet_address=wallet["address"],
@@ -247,7 +266,7 @@ async def create_campaign(
             target_dmas=list(body.target_dmas),
             start_date=body.start_date,
             end_date=body.end_date,
-            protocol_fee_amount=quote.protocol_fee_usdc,
+            protocol_fee_amount=quote.protocol_fee_micro,
         )
         db.add(campaign)
         db.commit()
@@ -265,7 +284,7 @@ async def create_campaign(
         # receives this full amount; the fee gets transferred out to
         # PROTOCOL_REVENUE_WALLET on the retry path right after settle confirms.
         requirements = x402_service.build_payment_requirements(
-            amount_usdc=quote.total_to_escrow_usdc,
+            amount_micro=quote.total_to_escrow_micro,
             pay_to_address=wallet["address"],
             resource_url=str(request.url),
             description=f"Fund campaign {body.name}",
@@ -306,9 +325,10 @@ async def create_campaign(
 
     # Reproduce the exact amount the original 402 emitted so the facilitator
     # /verify matches the client's signed payload. budget + fee == total escrow.
-    escrow_amount = float(campaign.budget) + float(campaign.protocol_fee_amount or 0)
+    # Integer micro arithmetic produces bit-identical bytes vs. the original.
+    escrow_amount_micro = int(campaign.budget) + int(campaign.protocol_fee_amount or 0)
     requirements = x402_service.build_payment_requirements(
-        amount_usdc=escrow_amount,
+        amount_micro=escrow_amount_micro,
         pay_to_address=campaign.wallet_address,
         resource_url=str(request.url),
         description=f"Fund campaign {campaign.name}",
@@ -353,13 +373,13 @@ async def create_campaign(
     # advertiser on refund), logs at exception level, but the campaign still
     # flips ACTIVE. Hackathon scope; production would want a retry queue
     # similar to services/retry.py for failed settlements.
-    fee_amount = float(campaign.protocol_fee_amount or 0)
-    if fee_amount > 0 and settings.protocol_revenue_wallet_address:
+    fee_amount_micro = int(campaign.protocol_fee_amount or 0)
+    if fee_amount_micro > 0 and settings.protocol_revenue_wallet_address:
         try:
             fee_tx_b64 = await build_usdc_transfer_tx(
                 from_address=campaign.wallet_address,
                 to_address=settings.protocol_revenue_wallet_address,
-                amount_usdc=fee_amount,
+                amount_micro=fee_amount_micro,
             )
             campaign.protocol_fee_tx_hash = await privy.sign_and_send_solana(
                 wallet_id=campaign.wallet_id,
@@ -368,9 +388,9 @@ async def create_campaign(
             )
         except Exception:  # noqa: BLE001
             logger.exception(
-                "protocol fee transfer failed campaign=%s amount=%s — campaign still activates",
+                "protocol fee transfer failed campaign=%s amount_micro=%d — campaign still activates",
                 campaign.id,
-                fee_amount,
+                fee_amount_micro,
             )
 
     campaign.status = CampaignStatus.ACTIVE.value
@@ -502,23 +522,27 @@ def campaign_stats(
         label = venues.label_for_device(device_id) or "Unknown"
         plays_by_dma[label] = plays_by_dma.get(label, 0) + int(n)
 
+    budget_micro = int(c.budget)
+    spent_micro = int(c.spent)
     return CampaignStats(
         campaign_id=c.id,
         status=c.status,
-        budget=float(c.budget),
-        spent=float(c.spent),
-        remaining_budget=float(c.budget) - float(c.spent),
+        budget=micro_str(budget_micro),
+        spent=micro_str(spent_micro),
+        remaining_budget=micro_str(budget_micro - spent_micro),
         total_plays=int(total_plays),
         last_24h_plays=last_24h_plays,
         pending_plays=int(pending_plays),
-        total_confirmed_usdc=float(total_confirmed_usdc),
-        cpm_price=float(c.cpm_price),
+        total_confirmed_usdc=micro_str(int(total_confirmed_usdc)),
+        cpm_price=micro_str(int(c.cpm_price)),
         target_dmas=c.target_dmas,
         start_date=c.start_date,
         end_date=c.end_date,
-        protocol_fee_amount=float(c.protocol_fee_amount)
-        if c.protocol_fee_amount is not None
-        else None,
+        protocol_fee_amount=(
+            micro_str(int(c.protocol_fee_amount))
+            if c.protocol_fee_amount is not None
+            else None
+        ),
         protocol_fee_tx_hash=c.protocol_fee_tx_hash,
         protocol_fee_solscan_url=_solscan_tx_url(c.protocol_fee_tx_hash),
         plays_by_dma=plays_by_dma,
@@ -577,7 +601,7 @@ def resume_campaign(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"can only resume paused campaigns (current: {c.status})",
         )
-    if float(c.budget) - float(c.spent) <= 0:
+    if int(c.budget) - int(c.spent) <= 0:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="campaign has no remaining budget — refund instead of resume",
@@ -636,11 +660,11 @@ async def refund_campaign(
     # Re-load post-flush so `spent` reflects everything paid out.
     db.refresh(c)
 
-    remaining = float(c.budget) - float(c.spent)
-    if remaining <= 0:
+    remaining_micro = int(c.budget) - int(c.spent)
+    if remaining_micro <= 0:
         c.status = CampaignStatus.REFUNDED.value
         db.commit()
-        return RefundResponse(refund_amount=0.0, tx_hash=None, solscan_url=None)
+        return RefundResponse(refund_amount=micro_str(0), tx_hash=None, solscan_url=None)
 
     if not c.advertiser_wallet:
         raise HTTPException(
@@ -653,7 +677,7 @@ async def refund_campaign(
         tx_b64 = await build_usdc_transfer_tx(
             from_address=c.wallet_address,
             to_address=c.advertiser_wallet,
-            amount_usdc=remaining,
+            amount_micro=remaining_micro,
         )
         tx_hash = await privy.sign_and_send_solana(
             wallet_id=c.wallet_id,
@@ -703,7 +727,7 @@ async def refund_campaign(
             )
 
     return RefundResponse(
-        refund_amount=remaining,
+        refund_amount=micro_str(remaining_micro),
         tx_hash=tx_hash,
         solscan_url=_solscan_tx_url(tx_hash),
     )
@@ -729,8 +753,8 @@ async def simulate_play(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"campaign not active: {c.status}",
         )
-    amount = float(c.cpm_price) / 1000.0
-    if float(c.budget) - float(c.spent) + 1e-9 < amount:
+    amount_micro = int(c.cpm_price) // 1000
+    if int(c.budget) - int(c.spent) < amount_micro:
         raise HTTPException(status_code=400, detail="insufficient campaign budget")
 
     # Schedule window must contain today (mirrors /bid).
@@ -764,7 +788,7 @@ async def simulate_play(
         wallet_id=settings.demo_publisher_wallet,
         nonce=f"simulate-{uuid4().hex}",
         created_at=int(time.time()),
-        amount_usdc=amount,
+        amount_micro=amount_micro,
         device_id=device["device_id"],
     )
 
@@ -773,7 +797,7 @@ async def simulate_play(
     # BATCH_FLUSH_INTERVAL_SECONDS. UI shows the row as "queued" until then.
     row = await execute_settlement(claims, db)
     return SimulatePlayResponse(
-        amount_usdc=amount,
+        amount_usdc=micro_str(amount_micro),
         tx_hash=None,
         solscan_url=None,
         publisher_wallet=settings.demo_publisher_wallet,

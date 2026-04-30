@@ -4,6 +4,7 @@ Run:
     docker compose run --rm backend python scripts/audit_ledger_verbose.py
 
 Same as audit_ledger.py but prints ALL DB columns for campaigns flagged DRIFT.
+Session 16.9: every comparison is exact integer micro.
 """
 
 from __future__ import annotations
@@ -20,11 +21,13 @@ from sqlalchemy import func, inspect as sa_inspect  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models import Campaign, CampaignStatus, Settlement, SettlementStatus  # noqa: E402
-from app.services.solana import get_usdc_balance  # noqa: E402
+from app.services.solana import get_usdc_balance_micro  # noqa: E402
 
 
-USDC_TOLERANCE = 1e-6
-CAMPAIGN_TOLERANCE = 1e-3
+def _fmt_micro(micro: int) -> str:
+    sign = "-" if micro < 0 else ""
+    a = abs(int(micro))
+    return f"{sign}{a // 1_000_000}.{a % 1_000_000:06d}"
 
 
 def _trunc(addr: str, n: int = 6) -> str:
@@ -38,7 +41,7 @@ def _dump_campaign(c: Campaign) -> None:
     for col in mapper.columns:
         val = getattr(c, col.key, None)
         print(f"  │  {col.key:<32} = {val}")
-    print(f"  └──")
+    print("  └──")
 
 
 async def _get_sol_balance(client: AsyncClient, address: str) -> float:
@@ -70,19 +73,21 @@ async def _section_publishers(db) -> None:
     print(f"  {'wallet':<20} {'plays':>6} {'expected':>14} {'actual':>14} {'diff':>14}  flag")
     print(f"  {'-'*20} {'-'*6} {'-'*14} {'-'*14} {'-'*14}  {'-'*5}")
     short_count = 0
-    for wallet, expected, n in rows:
-        expected = float(expected)
-        actual = await get_usdc_balance(wallet)
+    for wallet, expected_micro, n in rows:
+        expected = int(expected_micro)
+        actual = await get_usdc_balance_micro(wallet)
         diff = actual - expected
-        if diff < -USDC_TOLERANCE:
+        if diff < 0:
             flag = "SHORT"
             short_count += 1
-        elif abs(diff) <= USDC_TOLERANCE:
+        elif diff == 0:
             flag = "OK"
         else:
             flag = "MORE"
         print(
-            f"  {_trunc(wallet, 14):<20} {n:>6} {expected:>14.6f} {actual:>14.6f} {diff:>+14.6f}  {flag}"
+            f"  {_trunc(wallet, 14):<20} {n:>6} "
+            f"{_fmt_micro(expected):>14} {_fmt_micro(actual):>14} "
+            f"{('+' if diff >= 0 else '') + _fmt_micro(diff):>14}  {flag}"
         )
 
     if short_count:
@@ -106,50 +111,61 @@ async def _section_campaigns(db) -> None:
     )
     print(f"  {'-'*32} {'-'*10} {'-'*10} {'-'*10} {'-'*10}  {'-'*5}")
 
-    drift_total = 0.0
+    drift_total_micro = 0
     drift_campaigns: list[Campaign] = []
-    refunded_orphaned_fee = 0.0
-    refunded_stranded_total = 0.0
+    refunded_orphaned_fee_micro = 0
+    refunded_stranded_total_micro = 0
 
     for c in campaigns:
         if not c.wallet_address:
             continue
-        budget = float(c.budget or 0)
-        spent = float(c.spent or 0)
-        fee = float(c.protocol_fee_amount or 0)
+        budget = int(c.budget or 0)
+        spent = int(c.spent or 0)
+        fee = int(c.protocol_fee_amount or 0)
         fee_paid = bool(c.protocol_fee_tx_hash)
 
         if c.status == CampaignStatus.DRAFT.value:
-            expected = 0.0
+            expected = 0
         elif c.status == CampaignStatus.REFUNDED.value:
-            expected = fee if not fee_paid else 0.0
+            expected = fee if not fee_paid else 0
         else:
-            expected = (budget - spent) + (fee if not fee_paid else 0.0)
+            expected = (budget - spent) + (fee if not fee_paid else 0)
 
-        actual = await get_usdc_balance(c.wallet_address)
+        actual = await get_usdc_balance_micro(c.wallet_address)
         diff = actual - expected
 
-        if abs(diff) <= CAMPAIGN_TOLERANCE:
+        if diff == 0:
             flag = "OK"
         else:
             flag = "DRIFT"
-            drift_total += abs(diff)
+            drift_total_micro += abs(diff)
             drift_campaigns.append(c)
 
         if c.status == CampaignStatus.REFUNDED.value:
-            refunded_stranded_total += actual
+            refunded_stranded_total_micro += actual
             if not fee_paid:
-                refunded_orphaned_fee += fee
+                refunded_orphaned_fee_micro += fee
 
         print(
-            f"  {c.id[:32]:<32} {c.status:<10} {expected:>10.4f} {actual:>10.4f} {diff:>+10.4f}  {flag}"
+            f"  {c.id[:32]:<32} {c.status:<10} "
+            f"{_fmt_micro(expected)[:10]:>10} {_fmt_micro(actual)[:10]:>10} "
+            f"{(('+' if diff >= 0 else '') + _fmt_micro(diff))[:10]:>10}  {flag}"
         )
 
     print()
-    print(f"  Refunded campaigns — total stranded USDC on-chain: {refunded_stranded_total:.4f}")
-    print(f"  Of that, declared orphaned fee (BACKEND-REVIEW §1.1): {refunded_orphaned_fee:.4f}")
-    if drift_total > 0:
-        print(f"  ⚠  cumulative |drift| across DRIFT rows: {drift_total:.4f} USDC")
+    print(
+        f"  Refunded campaigns — total stranded USDC on-chain: "
+        f"{_fmt_micro(refunded_stranded_total_micro)}"
+    )
+    print(
+        f"  Of that, declared orphaned fee (BACKEND-REVIEW §1.1): "
+        f"{_fmt_micro(refunded_orphaned_fee_micro)}"
+    )
+    if drift_total_micro > 0:
+        print(
+            f"  ⚠  cumulative |drift| across DRIFT rows: "
+            f"{_fmt_micro(drift_total_micro)} USDC"
+        )
     else:
         print("  ✓ no DRIFT rows (every campaign matches expected).")
 
@@ -186,11 +202,14 @@ async def _section_service_wallets(client: AsyncClient) -> None:
     print(f"  {'role':<18} {'address':<22} {'SOL':>14} {'USDC':>14}")
     print(f"  {'-'*18} {'-'*22} {'-'*14} {'-'*14}")
     for role, address in targets:
-        sol, usdc = await asyncio.gather(
+        sol, usdc_micro = await asyncio.gather(
             _get_sol_balance(client, address),
-            get_usdc_balance(address),
+            get_usdc_balance_micro(address),
         )
-        print(f"  {role:<18} {_trunc(address, 16):<22} {sol:>14.6f} {usdc:>14.6f}")
+        print(
+            f"  {role:<18} {_trunc(address, 16):<22} "
+            f"{sol:>14.6f} {_fmt_micro(usdc_micro):>14}"
+        )
 
 
 async def main() -> int:

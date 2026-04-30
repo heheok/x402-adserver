@@ -1,6 +1,6 @@
-# Session 16.9 — Money refactor: float → integer microUSDC (TODO)
+# Session 16.9 — Money refactor: float → integer microUSDC ✅
 
-**Status:** ☐ Not started. Brief authored 2026-04-30. Decision locked, ready to delegate.
+**Status:** ✅ Shipped 2026-04-30. e2e 25/25, audit_ledger zero across all flags.
 
 **Why this exists:** PLAN.md "Must-fix before mainnet" §3 — money in Python is `float` end-to-end. Sums of `0.001` drift on the order of 1e-16 per step, requiring `+ 1e-9` epsilon tolerance on every budget guard and a "flip COMPLETED when `remaining < cost_per_play`" rule (instead of the natural `spent >= budget`). The DB columns are `Numeric(18, 6)` (exact in storage) but SQLAlchemy returns Python `float` due to the `Mapped[float]` annotations, so all math at the Python boundary reintroduces float drift.
 
@@ -347,6 +347,73 @@ The codebase already has the discipline patterns (atomic UPDATE, memo, compensat
 
 ---
 
-## Work log entry (fill in after completion)
+## Work log entry (2026-04-30)
 
-_To be written when the session ships. Match the style of other worklog files: what shipped, what was decided, surprises/findings worth keeping._
+**What shipped.** Money flows are now integer microUSDC end-to-end: DB columns, Python internals, the wire format, the JWT claim. Float USDC is contained to one well-marked UI spot (the WalletChip pending-amount delta) and config parsing (DEMO_CPM, faucet_amount_usdc), both passed through `services.money.to_micro()` at the boundary. Every `+ 1e-9` epsilon and tolerance comparison in the budget/spent path is gone — the brief's grep target (`1e-9|epsilon|tolerance` in `backend/app`) returns only historical-context comments, no live math.
+
+**The actual list of changes.**
+
+Backend
+- `app/services/money.py` (new) — `to_micro(usdc)` for trust boundaries, `micro_str(int)` for Pydantic responses.
+- `app/models.py` — `Numeric(18, 6)` + `Mapped[float]` flipped to `BigInteger` + `Mapped[int]` on `Campaign.cpm_price/budget/spent/protocol_fee_amount` and `Settlement.amount_usdc`. Column names kept (`cpm_price` still stores microUSDC per 1000 plays; the user pushed back on the originally-proposed rename to `cost_per_play_micro` because production needs CPM-as-bid-ceiling separate from per-play cleared price, which the rename would have lost). Docstring documents the unit.
+- `app/database.py` — dev-shim ALTER type for `protocol_fee_amount` updated `NUMERIC(18,6)` → `BIGINT`. The shim only fires on existing tables; clean wipe + create_all uses model types directly. Existing dev DB was wiped (no real data — only e2e fixtures and three drained `Soak N` rows from the 16.8 soak).
+- `app/services/calc.py` — `compute_quote` returns `Quote` with `cpm_price_micro / total_micro / protocol_fee_micro / total_to_escrow_micro` (renamed for clarity since the units changed). Protocol fee math uses basis points (250 bps = 2.5%) so it's `int * int // 10_000` with no rounding ambiguity.
+- `app/services/tokens.py` — `ProofContextClaims.amount_usdc: float` → `amount_micro: int`. Added a `v=2` version field on the JWT; v=1 (no version) decodes raise `ProofContextError` so old in-flight tokens fail loudly. TTL covers the deploy window.
+- `app/routers/proof.py` — atomic UPDATE guard is exact-int compare (`budget - spent >= :amount_micro`); COMPLETED-flip rule is bit-precise `Campaign.budget - new_spent < play_cost`. No epsilon.
+- `app/routers/bid.py` — `_pick_campaign` budget check is exact int. `_build_proof_context` mints `amount_micro = cpm_price_micro // 1000`. Bid response `price` field stays float USDC (OpenRTB convention is a number, not a string — display only, settlement is the JWT claim).
+- `app/services/auto_play.py` — `_EligibleSnapshot` is `tuple[str, int, tuple[str, ...]]` (cpm_price stays in micro per 1000 plays).
+- `app/services/batch_settler.py` — `_compensate_failed` does exact-int subtraction, exact-int COMPLETED→ACTIVE re-flip. `total_amount_micro = sum(int(r.amount_usdc) for r in rows)` instead of float.
+- `app/services/x402.py` — `build_payment_requirements(amount_micro: int)`. Drops the `int(round(* 1e6))` conversion — `maxAmountRequired` is just `str(amount_micro)`.
+- `app/services/solana.py` — `get_usdc_balance(...)` renamed to `get_usdc_balance_micro(...)` returning `int` (read from `value.amount` directly, not `ui_amount`). `build_usdc_transfer_tx(amount_micro: int)`. Drops the `int(round(* 1e6))` conversion. `transfer_checked` already takes the atomic-units int.
+- `app/routers/campaigns.py` — every `_to_summary` / `_to_settlement_summary` / `campaign_stats` / refund / simulate-play call site reformatted to pass `micro_str(int_value)` to schemas. The retry-flow `escrow_amount_micro` is exact int sum, producing bit-identical x402 PaymentRequirements bytes vs. the original 402.
+- `app/routers/wallet.py` — `usdc_balance` from `get_usdc_balance_micro`, `faucet_amount` derived once via `to_micro(settings.faucet_amount_usdc)` and reused for both the transfer and the response.
+- `app/routers/dashboard.py` — `DashboardActivityRow.amount_usdc` formatted as `micro_str(int(s.amount_usdc))`.
+- `app/services/retry.py` — pass-through to `build_usdc_transfer_tx(amount_micro=int(s.amount_usdc))`.
+- `app/schemas.py` — every money field on every response model is `MicroStr = str` (alias added for documentation). Field names kept stable so frontend type changes are mechanical `number → string`.
+
+Frontend
+- `frontend/src/lib/money.ts` (new) — BigInt-native `formatUsdc(microStr, dp)` (no JS Number round-trip → overflow-proof at any value), `parseUsdc(microStr)` for the WalletChip delta only, `sumMicro([microStr])` and `subMicro(a, b)` and `cmpMicro(a, b)` for math.
+- `frontend/src/lib/aggregations.ts` — `CampaignRow / SettlementRow / StatsRow` money fields flipped `number → string`. Comment marks the wire convention.
+- Display call sites updated across `Overview.tsx`, `Campaigns.tsx`, `CampaignCard.tsx`, `WalletChip.tsx`, `wizard/StepCalculator.tsx`, `wizard/StepReview.tsx`. The wizard's `createX402Client({ amount: BigInt(quote.total_to_escrow_usdc) })` drops the `* 1.05 * 1e6` slack — the 5% drift safety margin is no longer needed.
+- WalletChip is the one place float USDC is allowed: `parseUsdc` once at the `/api/wallet` boundary, then the chip's `+0.42 USDC inbound` animation runs on a JS `Number` since it's a UX delta indicator never compared to a campaign budget. Documented inline.
+
+Scripts
+- `scripts/audit_ledger.py` + `audit_ledger_verbose.py` — full rewrite to int micro. Comparisons are exact `==` instead of `< tolerance`. Custom `_fmt_micro(int)` formatter for human-readable display.
+- `scripts/e2e_demo.py` — `_seed_campaign(budget_micro: int, cpm_micro: int)`, the engineered-pending-rows fixtures and assertions all use int micro. The "spent matches expected" check is now `int(fresh.spent) == COST_PER_PLAY_MICRO` instead of `abs(... - ...) < 1e-9`.
+- `scripts/sweep_to_treasury.py`, `sweep_helpers.py`, `cleanup_drift.py`, `cleanup_drift_reverse.py`, `probe_sponsorship.py`, `topup_campaigns.py`, `check_balance.py` — all updated to use `get_usdc_balance_micro` + `amount_micro=` parameter.
+
+**Decisions taken during implementation.**
+
+1. _Keep `cpm_price` as the column name._ Brief originally proposed renaming to `cost_per_play_micro` for cleaner semantics. User pushed back — production with real publisher ecosystems needs CPM as a bid-ceiling concept (max-CPM on the campaign, cleared-CPM per settlement once auction logic lands), and storing per-play directly loses information (`// 1000` is lossy integer division). Industry convention (gas in gwei, SPL atomic units) is to store at the granularity the API uses. Kept `cpm_price`, documented that the unit is "microUSDC per 1000 plays" in the model docstring.
+
+2. _BigInt-native `formatUsdc` (not `Number` division)._ JS `Number` is fine per-value up to ~$9B in micro (2⁵³ safe-integer boundary), but a footgun for sums and totally invisible at the call site. The two-line BigInt divmod has zero downside and is overflow-proof at any platform scale. The brief proposed using `Number(s) / MICRO`; switched mid-flight after working through the realistic value ranges with the user.
+
+3. _Float USDC stays at the `WalletChip` delta boundary only, never elsewhere._ The chip animates `+0.42 USDC inbound · confirming…`. We `parseUsdc(...)` once at the wire boundary, do float math for the +1e-6 "balance arrived" check (this is a UX signal, not money correctness), and the rest of the app sees only micro strings. Documented inline so future readers know the rule.
+
+4. _Skipped sweep before DB wipe._ Inventory was 28 e2e/soak campaigns, all REFUNDED/COMPLETED/PAUSED. The PAUSED `e2e-refund-pending` fixtures held ~$0.012 total USDC — devnet, advertiser-funded from treasury faucet. User opted to wipe directly; net loss is a few cents in e2e-test wallets we'll never reuse, vs ~5 min of sweep script time.
+
+5. _Drop the x402 client's `*1.05` slack._ The 5% headroom on the wizard's `createX402Client({ amount })` was a float-drift safety margin from when amount was computed in float USDC. With exact int micro from server quote, the slack is no longer needed for correctness. Removed.
+
+**Surprises and findings.**
+
+- _The float drift was visibly present in the wild before the refactor._ Inspecting the old DB: `Soak 1` had `spent=0.6139999999999878` (614 plays at $0.001, expected exactly 0.614). On-chain was correct (614 transfers of exactly 1000 micro = 614_000 atomic units), but the DB float representation accumulated ~1e-14 of error per play. The audit was passing only because of the tolerance window. This validated the "must-fix" framing — the bug was real, just contained by epsilons.
+
+- _Brief's diagnosis was slightly off._ It said "SQLAlchemy returns Python `float` due to the `Mapped[float]` annotations." That's not how SQLAlchemy works — `Mapped[float]` is a type hint, runtime-irrelevant; `Numeric` returns `Decimal`. The actual float entry points were the explicit `float(c.budget)` / `float(c.spent)` casts scattered through `auto_play.py`, `bid.py`, `campaigns.py`, `proof.py`. Fix is the same; diagnosis is "grep `float(`" not "the model annotations."
+
+- _Pyright's stale-state caching during the refactor._ Diagnostics consistently lagged a turn or two behind the actual file state. Several "X is not defined" errors flagged code that had already been updated. Worth knowing when sequencing edits — verifying via `Read` instead of trusting Pyright's report between edits saves time.
+
+- _e2e revealed one pre-existing, unrelated issue._ The refund SOL sweep step in `routers/campaigns.refund_campaign` failed for a campaign wallet with 9_985_000 lamports (the post-tx-fee residual): trying to sweep `lamports - 10_000` left it below rent-exempt threshold, Privy rejected the broadcast. Non-blocking (logged-and-continue path), pre-dates this session, not introduced by the refactor. Filed mentally for a future session — refund SOL sweep needs to leave rent-exempt minimum, not just two-fees-worth.
+
+**Validation results.**
+
+- `tsc --noEmit` on frontend: clean (exit 0).
+- `scripts/e2e_demo.py`: **25/25 steps passed** including the multi-campaign batch isolation test (concurrent flushes producing distinct on-chain txs per campaign).
+- `scripts/audit_ledger.py`: **zero DRIFT, zero SHORT, zero IN-FLIGHT** across all 5 e2e campaigns. Publisher MORE flag is expected (pre-existing accumulated balance from prior soaks, +$2.45 over what this run alone should account for).
+- `grep -r "1e-9\|epsilon\|tolerance" backend/app` returns 3 hits, all in comments referencing the historical fix. No live math.
+- Backend boots cleanly with the new schema; auto-play loop and batch settler both running without errors.
+
+**What this enables.**
+
+- Session 17 (GCP deploy + Postgres migration) starts from a clean integer-money codebase. The Postgres migration just maps `BigInteger` to Postgres `BIGINT` — no NUMERIC-to-INT type-conversion gymnastics, no float-precision compatibility shims.
+- Audit and reconciliation scripts use exact equality, not tolerance bands. Any future drift will surface immediately, not get swallowed by `< 1e-3`.
+- The "real fix" called out in `PLAN.md` Must-fix #3 is shipped. PLAN's Must-fix list now has 3 items left (overcommit at /bid, per-publisher rate limiting, single-worker uvicorn) — none are demo blockers.

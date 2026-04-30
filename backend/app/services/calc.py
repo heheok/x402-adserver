@@ -6,8 +6,12 @@ Inputs the server controls: CPM, frequency constants, screen counts, fee %.
 
 The wizard hits POST /api/campaigns/quote during Step 4 and renders whatever
 this returns. The same function runs server-side on POST /api/campaigns to
-derive the actual `total_to_escrow_usdc` charged via x402 — clients don't get
-to negotiate the number.
+derive the actual escrow amount charged via x402 — clients don't get to
+negotiate the number.
+
+Session 16.9: every money field is integer microUSDC. 1 USDC = 1e6 micro.
+cpm_price is microUSDC per 1000 plays (e.g. $0.50 CPM → 500_000). Per-play
+cost is derived: cpm_price // 1000.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from ..config import get_settings
+from .money import to_micro
 from .venues import get_venues_index
 
 
@@ -24,11 +29,12 @@ class Quote:
     plays_per_screen_per_day: int
     days: int
     total_plays: int
-    cpm_price: float
-    total_usdc: float
-    protocol_fee_pct: float
-    protocol_fee_usdc: float
-    total_to_escrow_usdc: float
+    # All money fields are integer microUSDC.
+    cpm_price_micro: int  # micro per 1000 plays
+    total_micro: int
+    protocol_fee_pct: float  # display-only ratio (e.g. 0.025 for 2.5%)
+    protocol_fee_micro: int
+    total_to_escrow_micro: int
 
 
 class CalcError(ValueError):
@@ -65,6 +71,9 @@ def compute_quote(
     DMAs that resolve to zero screens, end before start). Validation of DMA
     label membership happens upstream in the Pydantic schema — by the time we
     reach this function the labels are already in the canonical set.
+
+    All math is integer microUSDC. Floor division (`//`) on derived values so
+    we never charge more than the sum.
     """
     if not target_dmas:
         raise CalcError("target_dmas must contain at least one DMA")
@@ -86,23 +95,26 @@ def compute_quote(
     days = (end_date - start_date).days + 1  # inclusive
 
     total_plays = screens * plays_per_screen_per_day * days
-    cpm = float(settings.demo_cpm)
-    total = total_plays * cpm / 1000.0
-    fee_pct = float(settings.protocol_fee_pct)
-    fee = total * fee_pct
-    escrow = total + fee
 
-    # Round to 6 decimals (USDC native precision). Floats are still floats; the
-    # mainnet rewrite in BUSINESS-CONSTRAINTS §7 / PLAN.md "must-fix" #3 moves
-    # all money to integer microUSDC.
+    # Convert config float CPM → integer micro at the trust boundary. After
+    # this, no float touches money math.
+    cpm_micro = to_micro(settings.demo_cpm)  # e.g. 500_000 for $0.50 CPM
+    cost_per_play_micro = cpm_micro // 1000  # e.g. 500 micro/play
+    total_micro = cost_per_play_micro * total_plays
+
+    # Protocol fee in basis points avoids float * int. 0.025 → 250 bps.
+    fee_bps = int(round(settings.protocol_fee_pct * 10_000))
+    protocol_fee_micro = (total_micro * fee_bps) // 10_000
+    total_to_escrow_micro = total_micro + protocol_fee_micro
+
     return Quote(
         screens=screens,
         plays_per_screen_per_day=plays_per_screen_per_day,
         days=days,
         total_plays=total_plays,
-        cpm_price=cpm,
-        total_usdc=round(total, 6),
-        protocol_fee_pct=fee_pct,
-        protocol_fee_usdc=round(fee, 6),
-        total_to_escrow_usdc=round(escrow, 6),
+        cpm_price_micro=cpm_micro,
+        total_micro=total_micro,
+        protocol_fee_pct=float(settings.protocol_fee_pct),
+        protocol_fee_micro=protocol_fee_micro,
+        total_to_escrow_micro=total_to_escrow_micro,
     )

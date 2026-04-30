@@ -9,6 +9,7 @@ from ..database import get_db
 from ..dependencies import AdvertiserIdentity, require_advertiser
 from ..models import Campaign, Settlement, SettlementStatus
 from ..schemas import DashboardActivityRow, DashboardSummary
+from ..services.money import micro_str
 from ..services.venues import get_venues_index
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
@@ -82,7 +83,7 @@ def dashboard_summary(
                 campaign_id=s.campaign_id,
                 campaign_name=campaign_name,
                 publisher_wallet=s.publisher_wallet,
-                amount_usdc=float(s.amount_usdc),
+                amount_usdc=micro_str(int(s.amount_usdc)),
                 tx_hash=s.tx_hash,
                 solscan_url=_solscan_tx_url(s.tx_hash),
                 status=s.status,

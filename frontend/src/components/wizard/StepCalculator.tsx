@@ -4,24 +4,26 @@ import { useSolanaWallets } from "@privy-io/react-auth/solana";
 
 import { useApi } from "../../lib/api";
 import { humanizeError } from "../../lib/errors";
+import { cmpMicro, formatUsdc, parseUsdc, subMicro } from "../../lib/money";
 import Icon from "../ui/Icon";
 import { Footer, Lbl } from "./Modal";
 import type { ScheduleWindow } from "./StepSchedule";
 import type { TargetingSelection } from "./StepTargeting";
 
+// Money fields are microUSDC strings (Session 16.9). 1 USDC = 1e6 micro.
 export type Quote = {
   screens: number;
   plays_per_screen_per_day: number;
   days: number;
   total_plays: number;
-  cpm_price: number;
-  total_usdc: number;
-  protocol_fee_pct: number;
-  protocol_fee_usdc: number;
-  total_to_escrow_usdc: number;
+  cpm_price: string; // microUSDC per 1000 plays
+  total_usdc: string;
+  protocol_fee_pct: number; // display ratio (0.025 = 2.5%)
+  protocol_fee_usdc: string;
+  total_to_escrow_usdc: string;
 };
 
-type WalletInfo = { wallet_address: string; usdc_balance: number };
+type WalletInfo = { wallet_address: string; usdc_balance: string };
 
 type Props = {
   targeting: TargetingSelection;
@@ -29,10 +31,6 @@ type Props = {
   onBack: () => void;
   onComplete: (quote: Quote) => void;
 };
-
-function fmtUsdc(n: number): string {
-  return n.toFixed(2);
-}
 
 export default function StepCalculator({
   targeting,
@@ -71,11 +69,13 @@ export default function StepCalculator({
   });
 
   const q = quote.data;
-  const balance = wallet.data?.usdc_balance ?? 0;
+  const balanceMicro = wallet.data?.usdc_balance ?? "0";
+  const balance = parseUsdc(balanceMicro);
+  // Exact integer compare in micro — no float drift, no epsilon.
   const insufficient =
     q !== undefined &&
     wallet.data !== undefined &&
-    q.total_to_escrow_usdc > balance + 1e-9;
+    cmpMicro(q.total_to_escrow_usdc, balanceMicro) > 0;
 
   return (
     <>
@@ -139,24 +139,24 @@ export default function StepCalculator({
                   CPM <span style={{ color: "var(--tx-3)" }}>(locked)</span>
                 </span>
               }
-              value={`${q.cpm_price.toFixed(2)} USDC`}
+              value={`${formatUsdc(q.cpm_price, 2)} USDC`}
               mono
             />
             <Calc
               label="Total"
-              value={`${fmtUsdc(q.total_usdc)} USDC`}
+              value={`${formatUsdc(q.total_usdc, 2)} USDC`}
               mono
               bold
             />
             <Calc
               label={`Protocol fee · ${(q.protocol_fee_pct * 100).toFixed(1)}%`}
-              value={`${fmtUsdc(q.protocol_fee_usdc)} USDC`}
+              value={`${formatUsdc(q.protocol_fee_usdc, 2)} USDC`}
               mono
               muted
             />
             <Calc
               label="Total to escrow"
-              value={`${fmtUsdc(q.total_to_escrow_usdc)} USDC`}
+              value={`${formatUsdc(q.total_to_escrow_usdc, 2)} USDC`}
               highlight
             />
           </div>
@@ -210,8 +210,8 @@ export default function StepCalculator({
             }}
           >
             Insufficient balance · need{" "}
-            {(q.total_to_escrow_usdc - balance).toFixed(2)} more USDC. Use the
-            faucet from the wallet menu.
+            {formatUsdc(subMicro(q.total_to_escrow_usdc, balanceMicro), 2)} more
+            USDC. Use the faucet from the wallet menu.
           </div>
         )}
       </div>

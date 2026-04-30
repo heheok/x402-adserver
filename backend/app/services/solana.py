@@ -42,8 +42,13 @@ def _memo_ix(memo: str) -> Instruction:
     )
 
 
-async def get_usdc_balance(owner_address: str) -> float:
-    """Read the USDC balance of `owner_address`. Returns 0.0 if the ATA does not exist."""
+async def get_usdc_balance_micro(owner_address: str) -> int:
+    """Read the USDC balance of `owner_address` as integer microUSDC.
+
+    Returns 0 if the ATA does not exist or RPC fails. The on-chain SPL
+    token balance is already an integer atomic-units value (decimals=6),
+    so we use it directly without round-tripping through float.
+    """
     settings = get_settings()
     owner = Pubkey.from_string(owner_address)
     mint = Pubkey.from_string(settings.usdc_mint_devnet)
@@ -53,14 +58,19 @@ async def get_usdc_balance(owner_address: str) -> float:
         try:
             resp = await client.get_token_account_balance(ata)
         except Exception:
-            return 0.0
+            return 0
         # solana-py sometimes returns an RPC error object (e.g.
         # `InvalidParamsMessage` when the ATA doesn't exist yet) instead of
         # raising — it has no `.value` attribute.
         value = getattr(resp, "value", None)
         if value is None:
-            return 0.0
-        return float(value.ui_amount or 0)
+            return 0
+        # `value.amount` is the atomic-units string ("422000"). Use it
+        # directly; `ui_amount` is the float we want to avoid.
+        try:
+            return int(value.amount)
+        except (AttributeError, ValueError, TypeError):
+            return 0
 
 
 async def get_sol_balance_lamports(address: str) -> int:
@@ -88,13 +98,15 @@ async def get_latest_blockhash_str() -> str:
 async def build_usdc_transfer_tx(
     from_address: str,
     to_address: str,
-    amount_usdc: float,
+    amount_micro: int,
     memo: str | None = None,
 ) -> str:
-    """Build a base64-encoded VersionedTransaction that transfers `amount_usdc` USDC.
+    """Build a base64-encoded VersionedTransaction that transfers `amount_micro`
+    microUSDC (1 USDC = 1_000_000 micro). Bytes-on-the-wire match the SPL
+    TransferChecked semantics, which use atomic units directly.
 
-    The `from_address` is the fee payer and token-account owner. Privy signs with it.
-    Creates the destination's USDC ATA idempotently if missing.
+    The `from_address` is the fee payer and token-account owner. Privy signs
+    with it. Creates the destination's USDC ATA idempotently if missing.
 
     Pass `memo` for callers that need byte-unique transactions per call (e.g.
     concurrent settlements with identical from/to/amount). The memo program
@@ -108,7 +120,7 @@ async def build_usdc_transfer_tx(
 
     source_ata = get_associated_token_address(from_pk, mint)
     dest_ata = get_associated_token_address(to_pk, mint)
-    amount_raw = int(round(amount_usdc * (10 ** USDC_DECIMALS)))
+    amount_raw = int(amount_micro)
 
     ata_ix = create_idempotent_associated_token_account(
         payer=from_pk,
@@ -193,7 +205,7 @@ async def build_campaign_bootstrap_tx(
 
 async def get_sol_lamports(address: str) -> int:
     """Read native SOL balance for any address. Returns 0 on RPC error
-    (matches `get_usdc_balance`'s defensive shape — the read shouldn't
+    (matches `get_usdc_balance_micro`'s defensive shape — the read shouldn't
     fail-fast since callers usually use it for sanity checks)."""
     settings = get_settings()
     try:

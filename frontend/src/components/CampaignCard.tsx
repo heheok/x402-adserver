@@ -11,6 +11,7 @@ import {
 } from "../lib/aggregations";
 import { humanizeError } from "../lib/errors";
 import { solscanAccountUrl, truncateAddress } from "../lib/format";
+import { formatUsdc, parseUsdc, subMicro } from "../lib/money";
 import { useWalletTrack } from "../lib/walletTrack";
 import CreativeThumb from "./ui/CreativeThumb";
 import Icon from "./ui/Icon";
@@ -20,7 +21,7 @@ import Solscan from "./ui/Solscan";
 import StatusBadge from "./ui/StatusBadge";
 
 type SimulatePlayResponse = {
-  amount_usdc: number;
+  amount_usdc: string; // microUSDC string
   // Session 16.8: tx_hash + solscan_url are null on the immediate response
   // (status="pending"); they fill in once the batch settler flushes the row,
   // visible via the next /stats poll.
@@ -33,7 +34,7 @@ type SimulatePlayResponse = {
 };
 
 type RefundResponse = {
-  refund_amount: number;
+  refund_amount: string; // microUSDC string
   tx_hash: string | null;
   solscan_url: string | null;
 };
@@ -66,7 +67,7 @@ export default function CampaignCard({
 
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const stats = useQuery<StatsRow & { cpm_price: number; remaining_budget: number }>({
+  const stats = useQuery<StatsRow & { cpm_price: string; remaining_budget: string }>({
     queryKey: ["campaign-stats", campaign.id],
     queryFn: async () => {
       const r = await authedApi.get(`/api/campaigns/${campaign.id}/stats`);
@@ -134,7 +135,10 @@ export default function CampaignCard({
     onError: (err: Error) => setActionError(humanizeError(err)),
   });
 
-  const pct = campaign.budget > 0 ? campaign.spent / campaign.budget : 0;
+  // Percentage is float — fine because it's a ratio, never compared to budget.
+  const budgetUsdc = parseUsdc(campaign.budget);
+  const spentUsdc = parseUsdc(campaign.spent);
+  const pct = budgetUsdc > 0 ? spentUsdc / budgetUsdc : 0;
   const busy =
     simulate.isPending ||
     pause.isPending ||
@@ -229,9 +233,9 @@ export default function CampaignCard({
               SPENT
             </span>
             <span className="x-mono x-tnum" style={{ color: "var(--tx-1)" }}>
-              {campaign.spent.toFixed(4)}{" "}
+              {formatUsdc(campaign.spent)}{" "}
               <span style={{ color: "var(--tx-3)" }}>
-                / {campaign.budget.toFixed(4)}
+                / {formatUsdc(campaign.budget)}
               </span>
             </span>
           </div>
@@ -412,7 +416,7 @@ export default function CampaignCard({
             value={
               stats.data ? (
                 <>
-                  {stats.data.cpm_price.toFixed(4)}{" "}
+                  {formatUsdc(stats.data.cpm_price, 2)}{" "}
                   <span style={{ fontSize: 10, color: "var(--tx-2)" }}>
                     USDC
                   </span>
@@ -422,7 +426,7 @@ export default function CampaignCard({
               )
             }
           />
-          <Stat label="Spent" value={campaign.spent.toFixed(4)} />
+          <Stat label="Spent" value={formatUsdc(campaign.spent)} />
           <Stat
             label={campaign.status === "refunded" ? "Refunded" : "Remaining"}
             value={
@@ -434,7 +438,7 @@ export default function CampaignCard({
                       : "var(--sol-teal)",
                 }}
               >
-                {(campaign.budget - campaign.spent).toFixed(4)}
+                {formatUsdc(subMicro(campaign.budget, campaign.spent))}
               </span>
             }
             sub={
@@ -449,7 +453,7 @@ export default function CampaignCard({
             label="Protocol fee"
             value={
               campaign.protocol_fee_amount != null
-                ? campaign.protocol_fee_amount.toFixed(4)
+                ? formatUsdc(campaign.protocol_fee_amount)
                 : "—"
             }
             sub={
@@ -489,13 +493,13 @@ export default function CampaignCard({
               }}
             >
               BUDGET ·{" "}
-              {campaign.budget > 0
-                ? ((campaign.spent / campaign.budget) * 100).toFixed(1)
+              {budgetUsdc > 0
+                ? (pct * 100).toFixed(1)
                 : "0.0"}
               % spent
             </span>
             <span className="x-mono x-tnum" style={{ color: "var(--tx-1)" }}>
-              {campaign.spent.toFixed(4)} / {campaign.budget.toFixed(4)} USDC
+              {formatUsdc(campaign.spent)} / {formatUsdc(campaign.budget)} USDC
             </span>
           </div>
           <Progress value={pct} />
@@ -804,7 +808,7 @@ export default function CampaignCard({
                 }}
               >
                 {s.status === "confirmed" ? "+" : ""}
-                {s.amount_usdc.toFixed(4)}
+                {formatUsdc(s.amount_usdc)}
               </span>
               <span style={{ textAlign: "right" }}>
                 {s.tx_hash && s.solscan_url ? (

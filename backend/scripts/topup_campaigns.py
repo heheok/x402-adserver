@@ -42,12 +42,16 @@ LAMPORTS_PER_SOL = 1_000_000_000
 
 
 def _required_lamports_for_remaining(c: Campaign) -> int:
-    remaining_usdc = max(0.0, float(c.budget) - float(c.spent))
-    cpm = float(c.cpm_price) if c.cpm_price else 0.0
-    if cpm <= 0:
+    """Session 16.9: integer micro arithmetic. cpm_price is micro per 1000 plays;
+    cost-per-play is exact floor-divide."""
+    remaining_micro = max(0, int(c.budget) - int(c.spent))
+    cpm_micro = int(c.cpm_price or 0)
+    if cpm_micro <= 0:
         return 0
-    cost_per_play = cpm / 1000.0
-    plays_remaining = int(remaining_usdc / cost_per_play + 0.5)
+    cost_per_play_micro = cpm_micro // 1000
+    if cost_per_play_micro <= 0:
+        return 0
+    plays_remaining = remaining_micro // cost_per_play_micro
     return plays_remaining * SOL_PER_PLAY_LAMPORTS + SOL_BASE_RESERVE_LAMPORTS
 
 

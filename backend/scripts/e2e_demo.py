@@ -82,7 +82,7 @@ from app.services.batch_settler import (  # noqa: E402
     flush_all,
 )
 from app.services.privy import PrivyClient, PrivyError  # noqa: E402
-from app.services.solana import build_sol_transfer_tx, build_usdc_transfer_tx, get_usdc_balance  # noqa: E402
+from app.services.solana import build_sol_transfer_tx, build_usdc_transfer_tx, get_usdc_balance_micro  # noqa: E402
 from app.services.tokens import ProofContextClaims, encode_proof_context  # noqa: E402
 from app.services.venues import DMA_LABELS, get_venues_index  # noqa: E402
 
@@ -107,6 +107,11 @@ PUBLISHER_WALLET = os.getenv(
 CAMPAIGN_BUDGET_USDC = 0.02   # cpm 1.0 -> 0.001/play -> 20 plays
 TINY_BUDGET_USDC = 0.002      # cpm 1.0 -> 0.001/play -> 2 plays exactly
 CPM_USDC = 1.0
+# Session 16.9: integer-micro equivalents for direct DB writes / settlements.
+CAMPAIGN_BUDGET_MICRO = 20_000   # 0.02 USDC
+TINY_BUDGET_MICRO = 2_000        # 0.002 USDC
+CPM_MICRO = 1_000_000            # 1.0 USDC per 1000 plays
+COST_PER_PLAY_MICRO = CPM_MICRO // 1000  # 1_000 micro = $0.001/play
 CONFIRM_TIMEOUT_SECONDS = 60  # devnet usually confirms inside 5s, but we've seen >15s outliers
 PRIVY_RPC_LAG_GRACE_SECONDS = 5  # small cushion between Privy-signed txs; most lag we saw earlier
 #                                  turned out to be a missing SOL balance, not RPC staleness
@@ -212,13 +217,13 @@ async def _fund_campaign_wallet(
     treasury_wallet_id: str,
     treasury_address: str,
     campaign_wallet_address: str,
-    amount_usdc: float,
+    amount_micro: int,
 ) -> str:
     """Treasury -> campaign wallet USDC transfer. Returns tx hash; raises if not confirmed."""
     tx_b64 = await build_usdc_transfer_tx(
         from_address=treasury_address,
         to_address=campaign_wallet_address,
-        amount_usdc=amount_usdc,
+        amount_micro=amount_micro,
     )
     tx_hash = await privy.sign_and_send_solana(
         wallet_id=treasury_wallet_id,
@@ -237,8 +242,8 @@ async def _seed_campaign(
     treasury_address: str,
     advertiser_id: str,
     advertiser_wallet: str,
-    budget: float,
-    cpm: float,
+    budget_micro: int,
+    cpm_micro: int,
     name: str,
 ) -> Campaign:
     """Stand-in for the x402 handshake: creates a wallet, funds it, writes the row."""
@@ -262,7 +267,7 @@ async def _seed_campaign(
         treasury_wallet_id=treasury_wallet_id,
         treasury_address=treasury_address,
         campaign_wallet_address=wallet["address"],
-        amount_usdc=budget,
+        amount_micro=budget_micro,
     )
     print(f"    funded + confirmed campaign wallet: {wallet['address']} (tx {fund_tx[:16]}…)")
 
@@ -276,9 +281,9 @@ async def _seed_campaign(
         name=name,
         creative_url="https://example.com/creative.mp4",
         creative_id=f"creative-{uuid4().hex[:8]}",
-        cpm_price=cpm,
-        budget=budget,
-        spent=0.0,
+        cpm_price=cpm_micro,
+        budget=budget_micro,
+        spent=0,
         status=CampaignStatus.ACTIVE.value,
         wallet_id=wallet["id"],
         wallet_address=wallet["address"],
@@ -392,18 +397,19 @@ async def step_preflight() -> tuple[str, str]:
 
     # One retry: devnet RPC occasionally 429s and our balance helper falls
     # through to 0.0 on error. One retry is enough to distinguish.
-    treasury_usdc = await get_usdc_balance(settings.treasury_wallet_address)
-    if treasury_usdc == 0.0:
+    treasury_micro = await get_usdc_balance_micro(settings.treasury_wallet_address)
+    if treasury_micro == 0:
         await asyncio.sleep(2)
-        treasury_usdc = await get_usdc_balance(settings.treasury_wallet_address)
-    if treasury_usdc < CAMPAIGN_BUDGET_USDC + TINY_BUDGET_USDC + 0.01:
+        treasury_micro = await get_usdc_balance_micro(settings.treasury_wallet_address)
+    min_required_micro = CAMPAIGN_BUDGET_MICRO + TINY_BUDGET_MICRO + 10_000  # +0.01 USDC headroom
+    if treasury_micro < min_required_micro:
         raise RuntimeError(
-            f"treasury has only {treasury_usdc} USDC — top up via Circle faucet first"
+            f"treasury has only {treasury_micro / 1_000_000:.4f} USDC — top up via Circle faucet first"
         )
     report.record(
         "backend + treasury healthy",
         True,
-        f"treasury={treasury_usdc:.4f} USDC",
+        f"treasury={treasury_micro / 1_000_000:.4f} USDC",
     )
     return settings.treasury_wallet_id, settings.treasury_wallet_address
 
@@ -448,12 +454,13 @@ async def step_happy_path(
     db = SessionLocal()
     try:
         fresh = db.query(Campaign).filter(Campaign.id == campaign.id).first()
-        expected = CPM_USDC / 1000.0
-        ok = fresh is not None and abs(float(fresh.spent) - expected) < 1e-9
+        # Session 16.9: exact integer comparison, no tolerance.
+        expected_micro = COST_PER_PLAY_MICRO
+        ok = fresh is not None and int(fresh.spent) == expected_micro
         report.record(
             "campaign.spent incremented",
             ok,
-            f"spent={fresh.spent if fresh else 'missing'}",
+            f"spent_micro={int(fresh.spent) if fresh else 'missing'}",
         )
     finally:
         db.close()
@@ -524,7 +531,7 @@ async def step_expired_proof(
         wallet_id=PUBLISHER_WALLET,
         nonce=f"expired-nonce-{uuid4().hex[:8]}",
         created_at=int(time.time()) - settings.proof_context_ttl_seconds - 60,
-        amount_usdc=CPM_USDC / 1000.0,
+        amount_micro=COST_PER_PLAY_MICRO,
     )
     token = encode_proof_context(claims, settings.jwt_server_secret, settings.jwt_algorithm)
     r = await _post(
@@ -592,8 +599,8 @@ async def step_budget_exhausted(
             treasury_address=treasury_address,
             advertiser_id=advertiser_id,
             advertiser_wallet=advertiser_wallet,
-            budget=TINY_BUDGET_USDC,
-            cpm=CPM_USDC,
+            budget_micro=TINY_BUDGET_MICRO,
+            cpm_micro=CPM_MICRO,
             name="e2e-tiny",
         )
     except PrivyError as e:
@@ -607,7 +614,7 @@ async def step_budget_exhausted(
     _quarantine_active_except(tiny.id)
 
     try:
-        expected_plays = int(round(TINY_BUDGET_USDC / (CPM_USDC / 1000.0)))
+        expected_plays = TINY_BUDGET_MICRO // COST_PER_PLAY_MICRO
         # Drain the budget.
         for i in range(expected_plays):
             r = await _post(client, "/bid", _bid_payload(PUBLISHER_WALLET))
@@ -680,8 +687,8 @@ async def step_double_refund(
     try:
         fresh = db.query(Campaign).filter(Campaign.id == campaign.id).first()
         assert fresh is not None
-        remaining = float(fresh.budget) - float(fresh.spent)
-        if remaining <= 0:
+        remaining_micro = int(fresh.budget) - int(fresh.spent)
+        if remaining_micro <= 0:
             fresh.status = CampaignStatus.REFUNDED.value
             db.commit()
             report.record("refund #1 (zero remaining -> no transfer)", True)
@@ -690,7 +697,7 @@ async def step_double_refund(
                 tx_b64 = await build_usdc_transfer_tx(
                     from_address=fresh.wallet_address,
                     to_address=advertiser_wallet,
-                    amount_usdc=remaining,
+                    amount_micro=remaining_micro,
                 )
                 tx_hash = await privy.sign_and_send_solana(
                     wallet_id=fresh.wallet_id,
@@ -706,7 +713,7 @@ async def step_double_refund(
             report.record(
                 "refund #1 sent",
                 True,
-                f"amount={remaining:.6f} tx {tx_hash[:16]}…",
+                f"amount_micro={remaining_micro} tx {tx_hash[:16]}…",
             )
     finally:
         db.close()
@@ -781,8 +788,8 @@ async def step_refund_with_pending(
             treasury_address=treasury_address,
             advertiser_id=advertiser_id,
             advertiser_wallet=advertiser_wallet,
-            budget=TINY_BUDGET_USDC,
-            cpm=CPM_USDC,
+            budget_micro=TINY_BUDGET_MICRO,
+            cpm_micro=CPM_MICRO,
             name="e2e-refund-pending",
         )
     except (PrivyError, RuntimeError) as e:
@@ -792,11 +799,9 @@ async def step_refund_with_pending(
     # Engineer 3 pending settlement rows + reserve their budget. Bypasses
     # the /proof path so we don't need a publisher API key here; the
     # batcher doesn't care how rows got into status='pending'.
-    from decimal import Decimal
-
-    amount = Decimal("0.0005")
+    amount_micro = 500  # 0.0005 USDC
     n_rows = 3
-    total_pending = amount * n_rows
+    total_pending_micro = amount_micro * n_rows
 
     db = SessionLocal()
     try:
@@ -811,7 +816,7 @@ async def step_refund_with_pending(
                     campaign_id=camp.id,
                     nonce=n,
                     publisher_wallet=PUBLISHER_WALLET,
-                    amount_usdc=amount,
+                    amount_usdc=amount_micro,
                     tx_hash=None,
                     status=SettlementStatus.PENDING.value,
                     device_id=None,
@@ -823,7 +828,7 @@ async def step_refund_with_pending(
         db.execute(
             sql_update(Campaign)
             .where(Campaign.id == camp.id)
-            .values(spent=Campaign.spent + total_pending)
+            .values(spent=Campaign.spent + total_pending_micro)
             .execution_options(synchronize_session=False)
         )
         db.commit()
@@ -911,8 +916,8 @@ async def step_refund_with_pending(
     )
     report.record(
         "refund response includes tx_hash",
-        refund_resp.tx_hash is not None and refund_resp.refund_amount > 0,
-        f"refund_amount={refund_resp.refund_amount} tx={refund_resp.tx_hash[:16] if refund_resp.tx_hash else None}…",
+        refund_resp.tx_hash is not None and int(refund_resp.refund_amount) > 0,
+        f"refund_amount_micro={refund_resp.refund_amount} tx={refund_resp.tx_hash[:16] if refund_resp.tx_hash else None}…",
     )
     report.record(
         "campaign status -> refunded",
@@ -943,8 +948,8 @@ async def step_multi_campaign_batch_isolation(
             treasury_address=treasury_address,
             advertiser_id=advertiser_id,
             advertiser_wallet=advertiser_wallet,
-            budget=TINY_BUDGET_USDC,
-            cpm=CPM_USDC,
+            budget_micro=TINY_BUDGET_MICRO,
+            cpm_micro=CPM_MICRO,
             name="e2e-iso-a",
         )
         camp_b = await _seed_campaign(
@@ -953,21 +958,19 @@ async def step_multi_campaign_batch_isolation(
             treasury_address=treasury_address,
             advertiser_id=advertiser_id,
             advertiser_wallet=advertiser_wallet,
-            budget=TINY_BUDGET_USDC,
-            cpm=CPM_USDC,
+            budget_micro=TINY_BUDGET_MICRO,
+            cpm_micro=CPM_MICRO,
             name="e2e-iso-b",
         )
     except (PrivyError, RuntimeError) as e:
         report.record("seed isolation campaigns", False, str(e))
         return
 
-    from decimal import Decimal
-
     from sqlalchemy import update as sql_update
 
     from app.models import UsedNonce
 
-    amount = Decimal("0.0005")
+    amount_micro = 500  # 0.0005 USDC
     db = SessionLocal()
     try:
         for camp in (camp_a, camp_b):
@@ -980,7 +983,7 @@ async def step_multi_campaign_batch_isolation(
                         campaign_id=camp.id,
                         nonce=n,
                         publisher_wallet=PUBLISHER_WALLET,
-                        amount_usdc=amount,
+                        amount_usdc=amount_micro,
                         tx_hash=None,
                         status=SettlementStatus.PENDING.value,
                         device_id=None,
@@ -989,7 +992,7 @@ async def step_multi_campaign_batch_isolation(
             db.execute(
                 sql_update(Campaign)
                 .where(Campaign.id == camp.id)
-                .values(spent=Campaign.spent + amount * 2)
+                .values(spent=Campaign.spent + amount_micro * 2)
                 .execution_options(synchronize_session=False)
             )
         db.commit()
@@ -1077,8 +1080,8 @@ async def main() -> int:
             treasury_address=treasury_address,
             advertiser_id=advertiser_id,
             advertiser_wallet=advertiser_wallet,
-            budget=CAMPAIGN_BUDGET_USDC,
-            cpm=CPM_USDC,
+            budget_micro=CAMPAIGN_BUDGET_MICRO,
+            cpm_micro=CPM_MICRO,
             name="e2e-main",
         )
     except (PrivyError, RuntimeError) as e:

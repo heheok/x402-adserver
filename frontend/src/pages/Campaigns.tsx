@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, useApi } from "../lib/api";
 import type { CampaignRow } from "../lib/aggregations";
 import { humanizeError } from "../lib/errors";
+import { formatUsdc, sumMicro } from "../lib/money";
 import CampaignCard from "../components/CampaignCard";
 import Icon from "../components/ui/Icon";
 
@@ -91,8 +92,8 @@ export default function Campaigns({ onNewCampaign, highlightId }: Props) {
   }
 
   const activeCount = rows.filter((c) => c.status === "active").length;
-  const totalSpent = rows.reduce((s, c) => s + c.spent, 0);
-  const totalBudget = rows.reduce((s, c) => s + c.budget, 0);
+  const totalSpentMicro = sumMicro(rows.map((c) => c.spent));
+  const totalBudgetMicro = sumMicro(rows.map((c) => c.budget));
 
   return (
     <div
@@ -119,8 +120,8 @@ export default function Campaigns({ onNewCampaign, highlightId }: Props) {
           </div>
           <div style={{ fontSize: 13, color: "var(--tx-2)", marginTop: 4 }}>
             {rows.length} campaign{rows.length === 1 ? "" : "s"} · {activeCount}{" "}
-            active · {totalSpent.toFixed(2)} USDC spent of{" "}
-            {totalBudget.toFixed(2)} funded
+            active · {formatUsdc(totalSpentMicro, 2)} USDC spent of{" "}
+            {formatUsdc(totalBudgetMicro, 2)} funded
           </div>
         </div>
       </div>

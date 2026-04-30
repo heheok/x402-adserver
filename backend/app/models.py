@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from enum import Enum
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, Numeric, String
+from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -45,9 +45,12 @@ class Campaign(Base):
     name: Mapped[str] = mapped_column(String)
     creative_url: Mapped[str] = mapped_column(String)
     creative_id: Mapped[str] = mapped_column(String)
-    cpm_price: Mapped[float] = mapped_column(Numeric(18, 6))
-    budget: Mapped[float] = mapped_column(Numeric(18, 6))
-    spent: Mapped[float] = mapped_column(Numeric(18, 6), default=0)
+    # Session 16.9: money is stored as integer microUSDC (1 USDC = 1e6 micro).
+    # cpm_price is "microUSDC per 1000 plays" — e.g. $0.50 CPM = 500_000.
+    # Per-play cost is derived: cpm_price // 1000.
+    cpm_price: Mapped[int] = mapped_column(BigInteger)
+    budget: Mapped[int] = mapped_column(BigInteger)
+    spent: Mapped[int] = mapped_column(BigInteger, default=0)
     status: Mapped[str] = mapped_column(String, default=CampaignStatus.DRAFT.value, index=True)
 
     wallet_id: Mapped[str] = mapped_column(String)
@@ -67,8 +70,8 @@ class Campaign(Base):
     # x402 funding tx; transferred from the campaign wallet to a dedicated
     # PROTOCOL_REVENUE_WALLET right after settle confirms. Non-refundable —
     # refund only returns budget - spent.
-    protocol_fee_amount: Mapped[float | None] = mapped_column(
-        Numeric(18, 6), nullable=True
+    protocol_fee_amount: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
     )
     protocol_fee_tx_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -84,7 +87,7 @@ class Settlement(Base):
     campaign_id: Mapped[str] = mapped_column(ForeignKey("campaigns.id"), index=True)
     nonce: Mapped[str] = mapped_column(String, unique=True, index=True)
     publisher_wallet: Mapped[str] = mapped_column(String)
-    amount_usdc: Mapped[float] = mapped_column(Numeric(18, 6))
+    amount_usdc: Mapped[int] = mapped_column(BigInteger)
     tx_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default=SettlementStatus.CONFIRMED.value)
     # device_id captures which screen the bid was issued for (from

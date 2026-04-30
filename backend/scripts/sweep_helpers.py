@@ -32,7 +32,7 @@ from app.config import get_settings  # noqa: E402
 from app.services.privy import PrivyClient, PrivyError  # noqa: E402
 from app.services.solana import (  # noqa: E402
     build_usdc_transfer_tx,
-    get_usdc_balance,
+    get_usdc_balance_micro,
 )
 
 
@@ -48,9 +48,9 @@ async def _sweep_one(
 ) -> bool:
     """Sweep one wallet's full USDC balance to the treasury. Returns True on success or skip."""
     print(f"→ {wallet_address}")
-    balance = await get_usdc_balance(wallet_address)
-    print(f"   balance: {balance:.6f} USDC")
-    if balance <= 0:
+    balance_micro = await get_usdc_balance_micro(wallet_address)
+    print(f"   balance: {balance_micro/1_000_000:.6f} USDC")
+    if balance_micro <= 0:
         print("   skip — empty")
         return True
 
@@ -63,7 +63,7 @@ async def _sweep_one(
         tx_b64 = await build_usdc_transfer_tx(
             from_address=wallet_address,
             to_address=treasury_address,
-            amount_usdc=balance,
+            amount_micro=balance_micro,
         )
         tx_hash = await client.sign_and_send_solana(
             wallet_id=wallet_id,

@@ -55,7 +55,7 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 - [Session 16.7 — Per-campaign live activity map (demo polish)](worklog/session-16.7.md) ✅
 - [Validation pass (2026-04-28) — hygiene reset + clean simulation](worklog/validation-pass-2026-04-28.md) ✅
 - [Session 16.8 — Batch settlements](worklog/session-16.8.md) ✅
-- [Session 16.9 — Money refactor: float → integer microUSDC](worklog/session-16.9.md) ☐ **brief ready, not started**
+- [Session 16.9 — Money refactor: float → integer microUSDC](worklog/session-16.9.md) ✅
 
 ### Session 17 — GCP deployment prep
 
@@ -82,6 +82,31 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 ### Buffer (sessions 19+)
 
 - Blockers, polish, stretch items (batch settlement toggle, better fraud checks).
+
+**UI polish backlog (logged 2026-04-30, post Session 16.9 browser walk):**
+
+- **Faucet button is not disabled while a faucet tx is in-flight** — `WalletChip.tsx`
+  renders the "Get test USDC" button as `disabled={faucet.isPending}` only for
+  the immediate POST round-trip; once the response lands, `isPending` is false
+  but the on-chain transfer can still take seconds to confirm. User can spam
+  the button → multiple Privy txs queue up. Fix: keep the button disabled
+  through the `pendingAmount` window (i.e. `disabled={faucet.isPending || pendingAmount !== null}`)
+  so it stays locked until the wallet poll observes the new balance.
+
+- **Total plays + per-DMA map markers flicker during pending→flushing→confirmed**
+  on `CampaignCard`. Symptom: a play arrives, count goes from N to N+1, then
+  briefly drops back to N for ~5s, then jumps back to N+1. Root cause:
+  `routers/campaigns.campaign_stats` counts settlements with status in
+  `(PENDING, CONFIRMED)` for `total_plays` and `plays_by_dma` — but the batch
+  settler atomically flips PENDING → FLUSHING when it claims a row, and FLUSHING
+  is NOT in the counted set, so the row is invisible to the count for the
+  duration of the on-chain wait. Fix: add `SettlementStatus.FLUSHING.value` to
+  `counted_statuses` in `campaign_stats` and the equivalent filter in
+  `routers/dashboard.dashboard_summary` (`base_q` and the `recent_activity`
+  query). Same idea: a FLUSHING row represents "play happened, money is on
+  the way" — it should count exactly like PENDING does. The brief mention in
+  Session 16.8 worklog of "pending + confirmed counts" predates the FLUSHING
+  state being introduced; the count filter just didn't get updated.
 
 ---
 
@@ -178,24 +203,44 @@ plays distributed across 3 active campaigns with auto-play burst-firing
 zero SHORT — every confirmed DB settlement matched a real on-chain transfer
 to the microUSDC. Atomic UPDATE holds under burst-fire load.
 
-### 3. Money is stored as `float`, not integer microUSDC — scheduled for Session 16.9
+### 3. Money is stored as `float`, not integer microUSDC ✅ FIXED (Session 16.9)
 
-**Brief ready:** `worklog/session-16.9.md` has the full file-by-file plan, locked decision (string microUSDC on the wire + int micro internal), and validation criteria. Slotted before Session 17 (GCP deploy) so the Postgres migration doesn't carry float legacy.
+**Symptom (historical):** `campaigns.budget`, `campaigns.spent`, and the Python
+math throughout `/bid` `/proof` and `auto_play` all used `float`. Summing
+`0.001` many times drifted ~1e-16 per step, so the "final play" guard could
+reject a semantically-valid play and leave unplayable dust ACTIVE. Demo-time
+band-aid was `+ 1e-9` epsilon tolerance on every budget guard AND flipping
+COMPLETED when `remaining < cost_per_play` (not `spent >= budget`). Drift was
+visibly present in the wild — the pre-refactor DB had rows like
+`spent=0.6139999999999878` for a campaign that ran exactly 614 plays at
+$0.001/play.
 
-`campaigns.budget`, `campaigns.spent`, and the Python math throughout `/bid`
-`/proof` and `auto_play` all use `float`. Summing `0.001` many times drifts
-on the order of `1e-16` per step, so the "final play" guard can reject a
-semantically-valid play and/or leave unplayable dust in a campaign. Current
-fix (2026-04-22) is `+ 1e-9` epsilon tolerance on every budget guard AND
-flipping `COMPLETED` when `remaining < cost_per_play` (not `spent >= budget`).
-That works for demo scale but is band-aid on top of the real issue.
+**Fix shipped:** money is integer microUSDC (1 USDC = 1_000_000 micro)
+end-to-end:
 
-**Real fix:** store money as integer microUSDC (1 USDC = 1_000_000 units) in
-both the DB (`Integer` columns) and Python. No floats anywhere in the money
-path. Same 6-decimal precision the SPL token mint uses on-chain, and every
-comparison becomes exact integer equality. Eliminates both the
-precision-rejected play and the dust-limbo-ACTIVE states without needing
-tolerance at all.
+- DB columns are `BigInteger` (`campaigns.cpm_price/budget/spent/protocol_fee_amount`,
+  `settlements.amount_usdc`).
+- Python internals are `int` micro everywhere; no float in any money path.
+- Wire format is a string of integer micro (e.g. `"422000"` for $0.422),
+  matching x402 + SPL token convention. Pydantic field type alias is
+  `MicroStr = str`.
+- Frontend `lib/money.ts` provides BigInt-native `formatUsdc / sumMicro /
+  subMicro / cmpMicro` helpers; float USDC contained to one well-marked UI
+  spot (WalletChip pending-amount delta) at the `/api/wallet` boundary.
+- JWT `proof_context` claims carry `amount_micro: int` (v=2 schema; v=1 tokens
+  fail to decode after deploy — TTL covers the window).
+- `services/x402.build_payment_requirements(amount_micro)` and
+  `services/solana.build_usdc_transfer_tx(amount_micro)` both take int micro
+  directly; the `int(round(* 1e6))` conversions are gone.
+- `audit_ledger.py` uses exact `==` instead of tolerance bands.
+
+All `+ 1e-9`, `epsilon`, `< tolerance` comparisons in money paths are gone.
+
+**Validated 2026-04-30:** `e2e_demo.py` passes 25/25 (including multi-campaign
+batch isolation, refund-with-pending, drained-budget auto-completion).
+`audit_ledger.py` returns zero DRIFT, zero SHORT, zero IN-FLIGHT.
+`tsc --noEmit` clean on frontend. Browser walk-through ran 4 campaigns through
+the wizard + funded + auto-play soak.
 
 ### 4. Smaller things (same review)
 

@@ -64,7 +64,7 @@ async def retry_failed_settlements(
             tx_b64 = await build_usdc_transfer_tx(
                 from_address=campaign.wallet_address,
                 to_address=s.publisher_wallet,
-                amount_usdc=float(s.amount_usdc),
+                amount_micro=int(s.amount_usdc),
             )
             tx_hash = await privy.sign_and_send_solana(
                 wallet_id=campaign.wallet_id,
