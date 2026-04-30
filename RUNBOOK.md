@@ -226,8 +226,23 @@ Per campaign, expected on-chain USDC depends on lifecycle:
 | `active`/`paused`/`completed`/`expired` | `budget - spent` (+ `protocol_fee_amount` if fee tx never confirmed) |
 | `refunded` | 0 (+ orphaned fee if `protocol_fee_tx_hash` is null — see BACKEND-REVIEW.md §1.1) |
 
-Tolerance is 1e-3 USDC for active campaigns (covers float-math dust per
-must-fix #3). Anything larger flags `DRIFT`.
+Comparison is **exact integer microUSDC equality** (Session 16.9 — money is
+int micro end-to-end, no tolerance band). Any non-zero diff flags
+`DRIFT` unless explained by another column:
+
+| Flag | Meaning | Action |
+| --- | --- | --- |
+| `OK` | actual == expected, no review rows | nothing |
+| `IN-FLIGHT` | actual is HIGH by exactly the `pending` column total | wait — batch settler hasn't flushed yet |
+| `NEEDS-REVIEW` | rows are parked awaiting operator triage | run `scripts/triage_stuck.py list` |
+| `DRIFT` | unexplained mismatch | investigate via the forensic recipe below |
+
+The `review` column shows `N/<sum>` of NEEDS_REVIEW rows for the campaign.
+A row can have a non-empty `review` AND `OK` flag simultaneously — the
+common case is "broadcast landed but worker died before _mark_confirmed,"
+where on-chain is correct but the DB row hasn't caught up. The summary
+line at the bottom prints `🔍 NEEDS_REVIEW (run scripts/triage_stuck.py list)`
+with the total stuck amount whenever any review rows exist.
 
 The script also prints `Total stranded USDC across refunded campaigns` and
 `Of that, declared orphaned fee` — these quantify §1.1's leak in dollars.
@@ -310,16 +325,32 @@ of this doc).
 
 ### State machine
 ```
-pending  ─── batcher claims ───▶  flushing  ─── tx confirms ──▶  confirmed
-                                     │
-                                     ├── RPC blind ──▶ pending (next loop retries)
-                                     │
-                                     └── Privy refused ──▶ failed (compensating UPDATE)
+pending ── batcher claims ──▶ flushing ── tx confirms ──▶ confirmed
+                                  │
+                                  ├── on-chain status uncertain ──▶ needs_review (manual triage)
+                                  │   (Privy 5xx after broadcast, or 400 "already exists",
+                                  │    or RPC blind on confirmation poll)
+                                  │
+                                  └── Privy refused pre-broadcast ──▶ failed (compensating UPDATE)
 ```
 
 `pending` carries a reserved budget (the `/proof` atomic UPDATE moved
-`spent` at queue time). Compensation at definitive failure decrements
-`spent` back; replay protection holds because the nonce stays consumed.
+`spent` at queue time). `needs_review` keeps the reservation — operator
+decides via `triage_stuck.py` whether the on-chain tx landed (then
+`confirm`) or didn't (then `compensate`, which releases spent like
+`failed` does). `failed` is reserved for the Privy-rejected-pre-broadcast
+case where we have positive evidence the broadcast did NOT happen.
+Replay protection holds across all three terminal states because the
+nonce stays consumed.
+
+**Why we don't auto-retry uncertain rows:** Privy's `reference_id` is a
+post-broadcast recorder, not a pre-broadcast blocker (verified
+2026-04-30, see PLAN.md must-fix #4). Re-broadcasting a row whose
+reference_id Privy has already recorded causes a real on-chain
+duplicate-payment despite Privy returning 400 "already exists" — we
+watched a paused campaign drain $0.139 across 25 minutes from two
+cycling rows. The new behavior parks once and stops, bounding loss to
+at most one batch amount.
 
 ### Monitor pending count
 ```bash
@@ -339,8 +370,16 @@ docker compose run --rm backend python scripts/audit_ledger.py
 docker compose logs -f backend | grep "batch settler\|batch flush"
 ```
 Per-tick log line: `batch settler tick — confirmed=N failed=M left_pending=K`.
-Per-group log lines: `batch flush confirmed campaign=… rows=N tx=…` or
-`batch flush RPC-blind, leaving pending` (transient — next loop retries).
+Per-group log lines:
+- `batch flush confirmed campaign=… rows=N tx=…` — happy path.
+- `batch flush RPC-blind, parked NEEDS_REVIEW` — got a tx_hash from Privy
+  but couldn't confirm via getSignatureStatuses; row goes to operator triage.
+- `batch flush post-broadcast uncertain, parked NEEDS_REVIEW` — Privy
+  returned 5xx or 400 "already exists" without a tx_hash we can trust.
+- `batch flush DEFINITIVE failure` — clean Privy refusal pre-broadcast,
+  rows go to `failed` with compensation.
+- `batch settler startup: parked N orphaned FLUSHING rows -> NEEDS_REVIEW`
+  — fired once at process start when previous worker died mid-flush.
 
 ### Manually trigger a flush
 ```bash
@@ -365,16 +404,138 @@ call after each `/proof` step.
 `refund_campaign` synchronously calls `flush_campaign(id)` before
 computing `remaining = budget - spent`. If pending rows can't be
 flushed (RPC blind across multiple retries), refund returns 503 and
-the advertiser retries shortly. **Never proceed with refund while
-pending rows exist** — that would refund USDC the publishers are
-still owed.
+the advertiser retries shortly. If any rows are in `needs_review`,
+refund returns 409 — the operator must triage those first (otherwise
+we'd refund USDC that may have already been paid to the publisher).
+**Never proceed with refund while pending or needs_review rows exist.**
+
+---
+
+## Triage stuck settlements (NEEDS_REVIEW)
+
+Settlement rows in `needs_review` are batches whose on-chain status the
+batcher couldn't determine for itself: process killed mid-flush, or Privy
+returned 5xx / 400 "already exists" mid-broadcast. The fix is operator-
+driven because the wrong call (re-broadcast) is a live wallet drain;
+see "Why we don't auto-retry uncertain rows" above.
+
+### When you'll see them
+- After a backend crash / OOM / kill that landed during a flush window.
+- After Privy or its CDN had a hiccup. Audit shows a `review` column
+  on the affected campaign and the summary line
+  `🔍 NEEDS_REVIEW (run scripts/triage_stuck.py list): X USDC`.
+- After `/api/campaigns/{id}/refund` returns 409 with the message
+  `campaign has N settlement(s) requiring manual review`.
+
+### List
+```bash
+docker compose exec backend python scripts/triage_stuck.py list
+```
+Groups by `(campaign, publisher)` — same shape the batcher would have
+flushed in one tx. Each group prints the campaign name, wallet (with
+Solscan link), publisher, batch memo (`x402-batch:<first_nonce[:8]>-<n>`),
+the row IDs, and the total amount.
+
+### Find the on-chain truth
+The deterministic question to answer: **did the batch's tx actually land
+on-chain?** Two ways:
+
+**A. Eyeball Solscan.** Open the wallet's URL from the list output, scroll
+the recent transactions, look for one whose memo contains the batch memo
+(e.g. `x402-batch:auto-017-15`). The tx detail page on Solscan shows the
+memo program instruction's data field.
+
+**B. Memo lookup snippet.** When you have many groups to triage or want
+to script, use this one-off (also useful as a template; not yet a CLI
+subcommand):
+
+```bash
+docker compose exec backend python -c "
+import asyncio
+from solana.rpc.async_api import AsyncClient
+from solders.pubkey import Pubkey
+from solders.signature import Signature
+from app.config import get_settings
+
+WALLET = '<campaign wallet from triage list>'
+TARGET_MEMO = '<batch memo from triage list, e.g. x402-batch:auto-017-15>'
+MEMO_PROGRAM_ID = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'
+
+async def main():
+    settings = get_settings()
+    async with AsyncClient(settings.solana_rpc_url) as c:
+        sigs_resp = await c.get_signatures_for_address(Pubkey.from_string(WALLET), limit=50)
+        for s in (sigs_resp.value or []):
+            tx_resp = await c.get_transaction(Signature.from_string(str(s.signature)),
+                encoding='jsonParsed', max_supported_transaction_version=0)
+            if not tx_resp.value: continue
+            for ix in (tx_resp.value.transaction.transaction.message.instructions or []):
+                if str(getattr(ix, 'program_id', '')) == MEMO_PROGRAM_ID:
+                    parsed = getattr(ix, 'parsed', None)
+                    if isinstance(parsed, str) and TARGET_MEMO in parsed:
+                        print(f'MATCH: {s.signature}'); return
+        print('NO MATCH — broadcast did not land')
+
+asyncio.run(main())
+"
+```
+
+### Decide
+
+| On-chain state | Action |
+| --- | --- |
+| Tx with matching memo found, status=confirmed/finalized | `triage_stuck.py confirm --row-ids <ids> --tx-hash <found>` |
+| No matching memo after blockhash window (~2 min past `created_at`) | `triage_stuck.py compensate --row-ids <ids>` |
+| Multiple matching memos for the same batch | **Real double-broadcast.** Confirm with the first hash; the second is a duplicate payment that left the campaign wallet — accept as drift on devnet, or use `cleanup_drift_reverse.py` to claw back if it matters. |
+
+### Confirm
+
+```bash
+docker compose exec backend python scripts/triage_stuck.py confirm \
+  --row-ids id1,id2,id3 --tx-hash <signature>
+```
+
+Marks the rows `confirmed` with the supplied tx hash. Does NOT touch
+`spent` — the publisher really did get paid by that tx, and the original
+`/proof` UPDATE already accounted for it.
+
+### Compensate
+
+```bash
+docker compose exec backend python scripts/triage_stuck.py compensate \
+  --row-ids id1,id2,id3
+```
+
+Marks the rows `failed` AND decrements `campaign.spent` by their summed
+amount AND flips `completed → active` if the refund creates room for one
+more play. Use ONLY when you have positive evidence the broadcast did NOT
+land (memo lookup returned no match, blockhash window has passed).
+
+### Cleanup verification
+
+After every triage action:
+
+```bash
+docker compose exec backend python scripts/triage_stuck.py list   # should be empty
+docker compose run --rm backend python scripts/audit_ledger.py    # campaign should reconcile
+```
 
 ### Restart resilience
-Pending and flushing rows survive `docker compose restart backend`. On
-boot the batcher loop picks them up next tick. Deterministic
-`reference_id` per group (`batch-{campaign[:8]}-{first_nonce[:8]}`)
-makes the re-broadcast idempotent at the Privy layer — same tx hash
-returned, no double-broadcast.
+- **Pending rows** survive a restart. The batcher claims them on the next
+  tick. Safe because they were never broadcast.
+- **Flushing rows** are presumed orphaned (their worker died) and flipped
+  to `needs_review` on startup. The startup log line is
+  `batch settler startup: parked N orphaned FLUSHING rows -> NEEDS_REVIEW`.
+  Operator runs `scripts/triage_stuck.py list` to surface them.
+
+We deliberately do NOT auto-retry orphaned flushing rows. Privy's
+`reference_id` does not actually block re-broadcasts (verified
+2026-04-30 — Privy returns 400 "already exists" but the new tx still
+lands on-chain), so any re-broadcast of an orphaned row whose
+reference_id Privy already saw is a live wallet drain. The triage CLI
+gives the operator the explicit gate to verify on Solscan whether the
+original tx landed before any DB mutation. See must-fix #4 in PLAN.md
+for the production-grade fix that would re-enable automation.
 
 ### Tuning
 - **5s interval** is the demo default. Production probably wants 30–60s

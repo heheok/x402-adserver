@@ -192,15 +192,20 @@ async def _section_campaigns(db) -> None:
         # NEEDS-REVIEW rows have ambiguous on-chain status — could be paid
         # (actual lower than expected by review_amt) or unpaid (actual
         # equal to expected). Either way it's flagged for human triage.
+        # Accumulate review_total independent of the flag classification:
+        # a campaign can have NEEDS_REVIEW rows AND diff==0 (the common
+        # case — original tx landed, DB just doesn't know it yet) and we
+        # still want the bottom-of-section summary to surface them.
+        if review_n > 0:
+            review_total_micro += review_amt_micro
         post_flush_diff = diff - pending_amt_micro
         if diff == 0:
-            flag = "OK"
+            flag = "NEEDS-REVIEW" if review_n > 0 else "OK"
         elif pending_n > 0 and post_flush_diff == 0:
             flag = "IN-FLIGHT"
             in_flight_total_micro += pending_amt_micro
         elif review_n > 0:
             flag = "NEEDS-REVIEW"
-            review_total_micro += review_amt_micro
         else:
             flag = "DRIFT"
             drift_total_micro += abs(diff)
