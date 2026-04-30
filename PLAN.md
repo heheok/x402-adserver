@@ -217,7 +217,53 @@ batch isolation, refund-with-pending, drained-budget auto-completion).
 `tsc --noEmit` clean on frontend. Browser walk-through ran 4 campaigns through
 the wizard + funded + auto-play soak.
 
-### 4. Smaller things (same review)
+### 4. `post_broadcast_uncertain → mark_back_to_pending` actively drains campaign wallets (raised 2026-04-30)
+
+**Symptom (verified live):** A batch settlement row that ends up in
+`status='pending'` after a "reference_id already exists" error from Privy
+is re-claimed every batch tick, re-broadcast, returns the same error, and
+gets marked back to pending. Each cycle results in a *real* on-chain USDC
+transfer of the batch amount (~$0.001 per batch tick) leaving the campaign
+wallet, despite Privy's 400 response. We watched a paused campaign drain by
+~$0.139 over 25 minutes from two stuck pending rows alone.
+
+**Root cause hypothesis:** Privy's `reference_id` duplicate-check fires
+after the inner broadcast attempt, not before. Each retry has a fresh
+blockhash so the tx bytes differ from the original. Privy broadcasts the
+new tx, then notices the reference_id collision, then returns 400. The
+tx is already on-chain by then. The existing code path
+(`batch_settler._flush_group` → `post_broadcast_uncertain → _mark_back_to_pending`)
+sets us up to repeat this every 5s forever once a row enters the cycle.
+Documented in `services/privy.py` comments that `reference_id` is "NOT a
+strict pre-broadcast idempotency key" — this session is the live confirmation
+that it's not even a strict broadcast-blocker, just a recorder.
+
+**How rows enter the cycle (not exhaustive):** any time we re-broadcast a
+batch whose reference_id Privy has already seen. Triggers seen this
+session: (a) manual orphan-recovery (we flipped FLUSHING → PENDING and the
+re-broadcast collided), (b) the `post_broadcast_uncertain` path itself
+catching a 5xx after the original tx actually landed, then bouncing the
+row back to pending so the next tick repeats.
+
+**Real fix:** when Privy returns "already exists" on a sign_and_send_solana
+call, look up the original tx hash via Privy's API (or via on-chain
+inspection of the wallet's recent tx history filtered by reference_id /
+memo prefix), verify it confirmed, and either mark the batch CONFIRMED with
+that hash or compensate. Never re-broadcast a batch whose reference_id has
+already been recorded. Until that's built, do not introduce any code path
+that automatically re-broadcasts on collision. This blocks any production
+deployment.
+
+**Stop-gap shipped 2026-04-30:** the proposed `_recover_orphaned_flushing`
+on startup recovery is explicitly NOT implemented (see batch_settler.py
+docstring); FLUSHING rows must be manually triaged. The 2 stuck pending
+rows from this session were SQL-flipped to `failed` (without compensation)
+to break the cycle; ~$0.139 of unaccounted on-chain drift on campaign
+`9a522194-8bf2-467e-9f59-cb9c0ef2e4a1` and similar amounts on its
+siblings are accepted as devnet test losses (funds went to our own
+demo publisher wallet, recoverable manually).
+
+### 5. Smaller things (same review)
 
 - **No per-publisher rate limiting** on `/bid` + `/proof`. One publisher can
   DoS the ad server; mitigate with `slowapi` + Redis or at the reverse-proxy

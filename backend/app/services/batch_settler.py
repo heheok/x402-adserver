@@ -477,7 +477,21 @@ async def flush_campaign(
 
 
 async def run_batch_settler_loop(stop_event: asyncio.Event) -> None:
-    """Long-running task: ticks forever (until `stop_event` is set)."""
+    """Long-running task: ticks forever (until `stop_event` is set).
+
+    NOTE on orphaned FLUSHING rows: if the process dies mid-flush (uvicorn
+    --reload, container restart), rows that were atomically claimed
+    (PENDING -> FLUSHING) but never reached _mark_confirmed /
+    _mark_back_to_pending / _compensate_failed are orphaned — invisible to
+    this loop's PENDING filter, stuck "queued" in the UI. We deliberately
+    do NOT auto-recover them by flipping FLUSHING -> PENDING on startup,
+    because Privy's reference_id idempotency is NOT 100% reliable under
+    process-death-then-retry conditions (verified 2026-04-30: produced
+    real double-payments). Cleanup of orphaned FLUSHING rows must be
+    manual, after a Privy lookup confirms whether the original tx landed.
+    Tracked as a follow-up: build the Privy-lookup-based recovery before
+    we re-enable any automatic FLUSHING reclaim.
+    """
     settings = get_settings()
     if not settings.batch_enabled:
         logger.info("batch settler disabled (BATCH_ENABLED=false)")
