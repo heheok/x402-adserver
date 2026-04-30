@@ -1,0 +1,37 @@
+# Multi-stage build: produce a single immutable image that contains both
+# the static SPA assets and Caddy configured to serve them. Build context
+# is the repo root (so the same image carries the Caddyfile too).
+#
+# Build:    docker compose -f docker-compose.prod.yml build caddy
+# Standalone: docker build -f frontend/Dockerfile.prod -t x402-web .
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Install deps from the lockfile in a separate layer so source changes
+# don't bust the cache. `npm ci` enforces the lockfile — build fails if
+# it drifts from package.json, which is exactly what we want for
+# reproducible deploys.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+# Build-time env. Vite bakes VITE_* values into the bundle — they're
+# public client identifiers, not secrets. Override at build time with
+# --build-arg if a deploy needs different values. The Solana RPC default
+# (/solana-rpc) targets the Caddy proxy in this same image; for a dev-style
+# build that hits api.devnet.solana.com directly, pass an empty value.
+ARG VITE_PRIVY_APP_ID=cmo8vfv5x00tj0bl703wn5288
+ARG VITE_API_BASE_URL=
+ARG VITE_SOLANA_RPC_URL=/solana-rpc
+ENV VITE_PRIVY_APP_ID=$VITE_PRIVY_APP_ID
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+ENV VITE_SOLANA_RPC_URL=$VITE_SOLANA_RPC_URL
+
+COPY frontend/ ./
+RUN npm run build
+
+# ---
+
+FROM caddy:2-alpine
+COPY --from=builder /app/dist /srv/frontend
+COPY Caddyfile /etc/caddy/Caddyfile

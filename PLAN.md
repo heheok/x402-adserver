@@ -56,21 +56,23 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 - [Validation pass (2026-04-28) — hygiene reset + clean simulation](worklog/validation-pass-2026-04-28.md) ✅
 - [Session 16.8 — Batch settlements](worklog/session-16.8.md) ✅
 - [Session 16.9 — Money refactor: float → integer microUSDC](worklog/session-16.9.md) ✅
+- [Session 17 — Local prod-shape compose (Caddy + multi-stage SPA build)](worklog/session-17.md) ✅
 
-### Session 17 — GCP deployment prep
+### Session 18 — Deploy to GCE VM (gated on domain)
 
-- [ ] Cloud Run configs (backend)
-- [ ] Cloud SQL Postgres migration from SQLite
-- [ ] Secret Manager for Privy secret, JWT server secret, GCS credentials, Circle API key (when/if account upgrade lands)
-- [ ] Cloud Storage + CDN for dashboard build (separate bucket from creatives)
-- [ ] Workload Identity for the GCS creatives bucket so we drop the JSON service account key from prod
+**Topology (decided 2026-04-30, replacing earlier Cloud Run + Cloud SQL plan — see worklog/session-17.md for the why):**
+single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. Three containers — backend (FastAPI on internal docker network), caddy (TLS via Let's Encrypt + static SPA + reverse proxy on 80/443), and the multi-stage `x402-web` image baking the Vite build into Caddy. SQLite stays on the VM's persistent disk; no Postgres migration. ~$13/mo against GCP free-trial credits.
 
-### Session 18 — Deploy to GCP
-
-- [ ] Deploy backend to Cloud Run
-- [ ] Deploy dashboard
-- [ ] CORS, custom domain if time permits
-- [ ] Smoke test on live devnet
+- [ ] Decide domain (only blocker on the rest of this session)
+- [ ] Provision GCE e2-small VM (us-central1, Debian 12), install Docker
+- [ ] Reserve static external IP, point DNS A record at it
+- [ ] Firewall: 80/443 from 0.0.0.0/0, 22 from operator IP (or via IAP-tunneled SSH)
+- [ ] Push `x402-web` image to Artifact Registry (or build on the VM)
+- [ ] `scp` `backend/.env` + `backend/.secrets/` to the VM (Secret Manager deferred — fine for hackathon devnet)
+- [ ] `DOMAIN=your-domain.com docker compose -f docker-compose.prod.yml up -d --build`
+- [ ] Verify Let's Encrypt cert provisions on first boot (port 80 reachable for HTTP-01)
+- [ ] Smoke test the full demo loop on the live URL
+- [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo
 - [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function
 
 ### Session 19 — Demo rehearsal + submission
@@ -282,11 +284,11 @@ Filed for BUSINESS-CONSTRAINTS §7 (mainnet blockers) cross-reference.
 
 ## Open decisions still to resolve
 
-- Alembic migrations vs `create_all` — skipping Alembic until Postgres in Session 12.
-- Dashboard host port — pinning to 5173 locally; revisit for deploy.
+- ~~Alembic migrations vs `create_all`~~ — **resolved 2026-04-30**: SQLite stays in prod (Session 18 is single-VM with persistent disk, no Postgres migration), so `create_all` is sufficient for the lifetime of the hackathon. Reopen if/when we move to Postgres.
+- ~~Dashboard host port~~ — **resolved 2026-04-30**: irrelevant in prod-shape. Caddy serves the SPA on 443; dev keeps 5173 for the Vite dev server.
 - Rate limiting on `/api/faucet` — one shot per user per hour? Decide in Session 2.
 - **Decoupling campaign-api from ad-server** (raised 2026-04-21, deferred). Three options sized: Option A = shared DB + two FastAPI apps (~1 session), Option B = independent DBs + internal HTTP (~2–3 sessions, adds network hop to bid path — risky for <500ms target), Option C = event-driven (~3–5 sessions, production-grade). Leaning Option A if we decide to do it; slot between Session 7 and Session 8.
-- **SOL gas subsidy model — partially resolved by Session 9 findings, still open for production** (raised 2026-04-22 Session 7, updated 2026-04-22 Session 9). **For the advertiser-funding tx specifically**: resolved — x402-solana + x402.org forces facilitator-as-fee-payer (Config 2), so the advertiser needs zero SOL. x402.org's devnet facilitator sponsors gas for free. **Still open for campaign wallet ops** (`/proof` settlements, refunds): today the treasury seeds every new campaign wallet with 0.01 SOL (~$2 on mainnet) so it can pay its own fees. After refund, unused SOL is stranded. Options unchanged: **(A)** Privy fee sponsorship via `sponsor: true` on `sign_and_send_solana`; **(B)** keep subsidy + price into CPM; **(C)** move `/proof` settlement to a facilitator-like pattern. **Also now open for production of the funding flow**: public facilitators may charge or go away, so production likely needs us to run our own facilitator (Coinbase open-sourced Go + TS impls) and pay our own gas there. Decide before Session 13 (GCP deploy).
+- **SOL gas subsidy model — partially resolved by Session 9 findings, still open for production** (raised 2026-04-22 Session 7, updated 2026-04-22 Session 9). **For the advertiser-funding tx specifically**: resolved — x402-solana + x402.org forces facilitator-as-fee-payer (Config 2), so the advertiser needs zero SOL. x402.org's devnet facilitator sponsors gas for free. **Still open for campaign wallet ops** (`/proof` settlements, refunds): today the treasury seeds every new campaign wallet with 0.01 SOL (~$2 on mainnet) so it can pay its own fees. After refund, unused SOL is stranded. Options unchanged: **(A)** Privy fee sponsorship via `sponsor: true` on `sign_and_send_solana`; **(B)** keep subsidy + price into CPM; **(C)** move `/proof` settlement to a facilitator-like pattern. **Also now open for production of the funding flow**: public facilitators may charge or go away, so production likely needs us to run our own facilitator (Coinbase open-sourced Go + TS impls) and pay our own gas there. Status quo (treasury seeds 0.01 SOL per wallet) works for the hackathon devnet demo; decide before any mainnet path.
 
 ## Environment / secrets checklist
 

@@ -1,0 +1,36 @@
+{$DOMAIN:localhost} {
+	encode zstd gzip
+
+	# Solana RPC proxy. Browsers can't always hit api.devnet.solana.com directly
+	# (origin-specific CORS, rate limits attributed per-client-IP). Proxying
+	# server-side makes the request same-origin and shifts rate-limit attribution
+	# to the VM. x402-solana / @solana/web3.js POST JSON-RPC to whatever URL we
+	# hand them; here that's https://{$DOMAIN}/solana-rpc.
+	@solana_rpc path /solana-rpc /solana-rpc/*
+	handle @solana_rpc {
+		uri strip_prefix /solana-rpc
+		reverse_proxy https://api.devnet.solana.com {
+			header_up Host api.devnet.solana.com
+			# Solana's public RPC runs an anti-abuse layer that 403s any
+			# request whose Origin/Referer isn't in their (undocumented)
+			# allowlist. https://localhost isn't on it. Stripping these
+			# headers makes the upstream see a clean server-side call —
+			# verified by reproducing the 403 with `curl -H "Origin:
+			# https://localhost" ...` and getting 200 again with the
+			# header omitted.
+			header_up -Origin
+			header_up -Referer
+		}
+	}
+
+	@backend path /api/* /health /bid /proof
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

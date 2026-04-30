@@ -416,7 +416,10 @@ def list_campaigns(
 ) -> list[CampaignSummary]:
     rows = (
         db.query(Campaign)
-        .filter(Campaign.advertiser_id == advertiser.user_id)
+        .filter(
+            Campaign.advertiser_id == advertiser.user_id,
+            Campaign.status != CampaignStatus.DRAFT.value,
+        )
         .order_by(Campaign.created_at.desc())
         .all()
     )

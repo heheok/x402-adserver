@@ -6,6 +6,7 @@ import { useSolanaWallets } from "@privy-io/react-auth/solana";
 import { createX402Client } from "x402-solana/client";
 
 import { useApi } from "../../lib/api";
+import { solanaRpcUrl } from "../../lib/rpc";
 import { humanizeError } from "../../lib/errors";
 import { solscanTxUrl, truncateAddress } from "../../lib/format";
 import { cmpMicro, formatUsdc } from "../../lib/money";
@@ -115,6 +116,10 @@ export default function StepReview({
       const client = createX402Client({
         wallet: wallets[0],
         network: "solana-devnet",
+        // x402-solana defaults to https://api.devnet.solana.com which the
+        // browser can't reach reliably (CORS / rate limits). Prod build
+        // points this at the Caddy /solana-rpc proxy.
+        rpcUrl: solanaRpcUrl(),
         // Session 16.9: amount is exact integer micro from the server quote.
         // The historical *1.05 slack was a float-drift safety margin; gone now.
         amount: BigInt(quote.total_to_escrow_usdc),
