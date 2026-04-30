@@ -119,11 +119,10 @@ async def _section_campaigns(db) -> None:
         print("  (no campaigns)")
         return
 
-    # Session 16.8: per-campaign pending settlement totals. The /proof atomic
-    # UPDATE reserves budget at queue time (so `spent` already reflects them),
-    # but the USDC hasn't transferred out of the campaign wallet yet —
-    # on-chain balance reads HIGH by `pending_total` until the batch flushes.
-    # That's IN-FLIGHT, not DRIFT.
+    # Per-campaign pending+flushing settlement totals (genuine in-flight,
+    # clears within a tick) and needs_review totals (stuck, awaiting
+    # operator triage via scripts/triage_stuck.py — these are reported
+    # separately because their on-chain fate is ambiguous, NOT in-flight).
     pending_rows = (
         db.query(
             Settlement.campaign_id,
@@ -142,13 +141,28 @@ async def _section_campaigns(db) -> None:
         cid: (int(n), int(amt)) for cid, n, amt in pending_rows
     }
 
-    print(
-        f"  {'campaign':<32} {'status':<10} {'expected':>10} {'actual':>10} {'diff':>10} {'pending':>9}  flag"
+    review_rows = (
+        db.query(
+            Settlement.campaign_id,
+            func.count(Settlement.id),
+            func.coalesce(func.sum(Settlement.amount_usdc), 0),
+        )
+        .filter(Settlement.status == SettlementStatus.NEEDS_REVIEW.value)
+        .group_by(Settlement.campaign_id)
+        .all()
     )
-    print(f"  {'-'*32} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*9}  {'-'*9}")
+    review_by_campaign: dict[str, tuple[int, int]] = {
+        cid: (int(n), int(amt)) for cid, n, amt in review_rows
+    }
+
+    print(
+        f"  {'campaign':<32} {'status':<10} {'expected':>10} {'actual':>10} {'diff':>10} {'pending':>9} {'review':>9}  flag"
+    )
+    print(f"  {'-'*32} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*9} {'-'*9}  {'-'*10}")
 
     drift_total_micro = 0
     in_flight_total_micro = 0
+    review_total_micro = 0
     refunded_orphaned_fee_micro = 0
     refunded_stranded_total_micro = 0
 
@@ -160,6 +174,7 @@ async def _section_campaigns(db) -> None:
         fee = int(c.protocol_fee_amount or 0)
         fee_paid = bool(c.protocol_fee_tx_hash)
         pending_n, pending_amt_micro = pending_by_campaign.get(c.id, (0, 0))
+        review_n, review_amt_micro = review_by_campaign.get(c.id, (0, 0))
 
         if c.status == CampaignStatus.DRAFT.value:
             expected = 0
@@ -174,12 +189,18 @@ async def _section_campaigns(db) -> None:
         diff = actual - expected
 
         # IN-FLIGHT: actual is HIGH by exactly pending_amt_micro.
+        # NEEDS-REVIEW rows have ambiguous on-chain status — could be paid
+        # (actual lower than expected by review_amt) or unpaid (actual
+        # equal to expected). Either way it's flagged for human triage.
         post_flush_diff = diff - pending_amt_micro
         if diff == 0:
             flag = "OK"
         elif pending_n > 0 and post_flush_diff == 0:
             flag = "IN-FLIGHT"
             in_flight_total_micro += pending_amt_micro
+        elif review_n > 0:
+            flag = "NEEDS-REVIEW"
+            review_total_micro += review_amt_micro
         else:
             flag = "DRIFT"
             drift_total_micro += abs(diff)
@@ -192,11 +213,14 @@ async def _section_campaigns(db) -> None:
         pending_str = (
             f"{pending_n}/{_fmt_micro(pending_amt_micro)[:6]}" if pending_n else "—"
         )
+        review_str = (
+            f"{review_n}/{_fmt_micro(review_amt_micro)[:6]}" if review_n else "—"
+        )
         print(
             f"  {c.id[:32]:<32} {c.status:<10} "
             f"{_fmt_micro(expected)[:10]:>10} {_fmt_micro(actual)[:10]:>10} "
             f"{(('+' if diff >= 0 else '') + _fmt_micro(diff))[:10]:>10} "
-            f"{pending_str:>9}  {flag}"
+            f"{pending_str:>9} {review_str:>9}  {flag}"
         )
 
     print()
@@ -213,12 +237,17 @@ async def _section_campaigns(db) -> None:
             f"  ⏳ in-flight (queued, not yet on-chain): "
             f"{_fmt_micro(in_flight_total_micro)} USDC"
         )
+    if review_total_micro > 0:
+        print(
+            f"  🔍 NEEDS_REVIEW (run scripts/triage_stuck.py list): "
+            f"{_fmt_micro(review_total_micro)} USDC"
+        )
     if drift_total_micro > 0:
         print(
             f"  ⚠  cumulative |drift| across DRIFT rows: "
             f"{_fmt_micro(drift_total_micro)} USDC"
         )
-    elif in_flight_total_micro == 0:
+    elif in_flight_total_micro == 0 and review_total_micro == 0:
         print("  ✓ no DRIFT rows (every campaign matches expected).")
 
 

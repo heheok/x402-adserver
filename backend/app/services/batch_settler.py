@@ -140,16 +140,19 @@ def _mark_confirmed(db: Session, ids: list[str], tx_hash: str) -> None:
     db.commit()
 
 
-def _mark_back_to_pending(db: Session, ids: list[str]) -> None:
-    """Release flushing rows for the next loop tick. Used when the
-    on-chain status is unknown (RPC blind) — re-tries are safe because
-    Privy's reference_id idempotency means re-broadcasting the same group
-    yields the same tx hash, not a duplicate."""
+def _mark_needs_review(db: Session, ids: list[str]) -> None:
+    """Park flushing rows in NEEDS_REVIEW — terminal, non-claimable, no
+    spent compensation. Used when the on-chain fate is ambiguous (RPC
+    blind, post-broadcast uncertain Privy error). DO NOT re-broadcast:
+    Privy's reference_id check fires after broadcast, so each retry
+    drains the campaign wallet (verified 2026-04-30, see PLAN.md must-fix
+    #4). Operator triages via scripts/triage_stuck.py.
+    """
     stmt = (
         update(Settlement)
         .where(Settlement.id.in_(ids))
         .where(Settlement.status == SettlementStatus.FLUSHING.value)
-        .values(status=SettlementStatus.PENDING.value)
+        .values(status=SettlementStatus.NEEDS_REVIEW.value)
         .execution_options(synchronize_session=False)
     )
     db.execute(stmt)
@@ -326,14 +329,13 @@ async def _flush_group(
                 return (len(rows), 0, 0, [])
             # tx_hash exists but status is None — we broadcast something
             # but don't know its fate. Could be: dropped (definitively
-            # dead), in-flight but RPC-blind, or never-saw-it. Safe move:
-            # leave pending. Privy reference_id idempotency means the next
-            # loop's re-broadcast either returns this same hash (then
-            # we'll see status) or — if Privy thinks the prior request
-            # itself failed — sends a new tx that supersedes.
-            _mark_back_to_pending(db, row_ids)
+            # dead), in-flight but RPC-blind, or never-saw-it. Park as
+            # NEEDS_REVIEW for operator triage; the previous design's
+            # "back to pending" path drained wallets because Privy's
+            # reference_id check fires post-broadcast (PLAN.md must-fix #4).
+            _mark_needs_review(db, row_ids)
             logger.warning(
-                "batch flush RPC-blind, leaving pending campaign=%s rows=%d "
+                "batch flush RPC-blind, parked NEEDS_REVIEW campaign=%s rows=%d "
                 "tx=%s err=%s",
                 campaign.id,
                 len(rows),
@@ -346,9 +348,9 @@ async def _flush_group(
         # (BUSINESS-CONSTRAINTS.md §3): for some response codes, the tx may
         # have actually broadcast before Privy errored. We only compensate
         # when we have positive evidence the broadcast did NOT happen —
-        # otherwise leave pending and let the next tick retry (or operator
-        # intervene). Compensating-on-uncertainty was the original Session
-        # 16.6 bug we're solving.
+        # otherwise park NEEDS_REVIEW for operator triage. Compensating-on-
+        # uncertainty was the Session 16.6 bug; re-broadcasting-on-uncertainty
+        # was the must-fix #4 wallet-drain bug. Both avoided here.
         post_broadcast_uncertain = False
         if isinstance(e, PrivyError):
             if e.status_code >= 500:
@@ -363,9 +365,9 @@ async def _flush_group(
                 # broadcast. Per Privy docs §3.
                 post_broadcast_uncertain = True
         if post_broadcast_uncertain:
-            _mark_back_to_pending(db, row_ids)
+            _mark_needs_review(db, row_ids)
             logger.warning(
-                "batch flush post-broadcast uncertain, leaving pending "
+                "batch flush post-broadcast uncertain, parked NEEDS_REVIEW "
                 "campaign=%s rows=%d err=%s",
                 campaign.id,
                 len(rows),
@@ -476,26 +478,52 @@ async def flush_campaign(
     return result
 
 
+def _recover_orphaned_flushing_to_review(db: Session) -> int:
+    """On startup, flip any orphaned FLUSHING rows to NEEDS_REVIEW.
+
+    Rows enter FLUSHING when a worker atomically claims them; they exit
+    via _mark_confirmed / _mark_needs_review / _compensate_failed, all in
+    the worker's own exception-handled path. If the process dies mid-flush
+    (uvicorn --reload, container restart, OOM), the worker's handlers
+    never run and the rows are orphaned — invisible to the PENDING-filter
+    the loop uses. Flipping them straight to PENDING would cause re-broadcast
+    drains (Privy's reference_id check fires post-broadcast, see PLAN.md
+    must-fix #4), so we park them in NEEDS_REVIEW for operator triage via
+    scripts/triage_stuck.py.
+    """
+    stmt = (
+        update(Settlement)
+        .where(Settlement.status == SettlementStatus.FLUSHING.value)
+        .values(status=SettlementStatus.NEEDS_REVIEW.value)
+        .execution_options(synchronize_session=False)
+    )
+    result = db.execute(stmt)
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 async def run_batch_settler_loop(stop_event: asyncio.Event) -> None:
     """Long-running task: ticks forever (until `stop_event` is set).
 
-    NOTE on orphaned FLUSHING rows: if the process dies mid-flush (uvicorn
-    --reload, container restart), rows that were atomically claimed
-    (PENDING -> FLUSHING) but never reached _mark_confirmed /
-    _mark_back_to_pending / _compensate_failed are orphaned — invisible to
-    this loop's PENDING filter, stuck "queued" in the UI. We deliberately
-    do NOT auto-recover them by flipping FLUSHING -> PENDING on startup,
-    because Privy's reference_id idempotency is NOT 100% reliable under
-    process-death-then-retry conditions (verified 2026-04-30: produced
-    real double-payments). Cleanup of orphaned FLUSHING rows must be
-    manual, after a Privy lookup confirms whether the original tx landed.
-    Tracked as a follow-up: build the Privy-lookup-based recovery before
-    we re-enable any automatic FLUSHING reclaim.
+    Orphaned FLUSHING rows from a previous process crash are flipped to
+    NEEDS_REVIEW on startup (safe — no broadcast). Operator triages via
+    scripts/triage_stuck.py.
     """
     settings = get_settings()
     if not settings.batch_enabled:
         logger.info("batch settler disabled (BATCH_ENABLED=false)")
         return
+
+    db = SessionLocal()
+    try:
+        recovered = _recover_orphaned_flushing_to_review(db)
+        if recovered:
+            logger.warning(
+                "batch settler startup: parked %d orphaned FLUSHING rows -> NEEDS_REVIEW",
+                recovered,
+            )
+    finally:
+        db.close()
 
     privy = PrivyClient()
     interval = max(1, int(settings.batch_flush_interval_seconds))

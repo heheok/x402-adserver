@@ -38,15 +38,16 @@ def dashboard_summary(
     )
 
     # Plays across all of this advertiser's campaigns. Session 16.8: count
-    # pending + flushing + confirmed (the play happened the moment /proof
-    # returned; settlement state is implementation detail). FLUSHING covers
-    # the brief window while batch_settler is broadcasting on-chain — without
-    # it, the count flickers down by 1 mid-flush and back up on confirm.
-    # Failed rows still excluded.
+    # pending + flushing + confirmed + needs_review (the play happened the
+    # moment /proof returned; settlement state is implementation detail).
+    # FLUSHING covers the brief window while batch_settler is broadcasting,
+    # NEEDS_REVIEW is a stuck row awaiting operator triage. Failed rows
+    # (compensated, the play didn't happen) still excluded.
     counted = (
         SettlementStatus.PENDING.value,
         SettlementStatus.FLUSHING.value,
         SettlementStatus.CONFIRMED.value,
+        SettlementStatus.NEEDS_REVIEW.value,
     )
     base_q = (
         db.query(Settlement)

@@ -440,17 +440,18 @@ def campaign_stats(
 ) -> CampaignStats:
     c = _owned_campaign(db, campaign_id, advertiser)
 
-    # Session 16.8: count pending + flushing + confirmed for play-counting
-    # purposes (the play happened the moment /proof returned; settlement
-    # state is an implementation detail). FLUSHING is the brief window
-    # while the batch_settler is broadcasting on-chain — without it, the
-    # UI count flickers down by 1 when a row is claimed and back up when
-    # it confirms. USDC totals stay confirmed-only — that's
-    # money-actually-moved-on-chain, not money-owed.
+    # Session 16.8: count pending + flushing + confirmed + needs_review for
+    # play-counting purposes (the play happened the moment /proof returned;
+    # settlement state is an implementation detail). FLUSHING is the brief
+    # window while the batch_settler is broadcasting; NEEDS_REVIEW is a
+    # stuck row awaiting operator triage. From the publisher/impression
+    # perspective both still represent a play that happened. USDC totals
+    # stay confirmed-only — that's money-actually-moved-on-chain.
     counted_statuses = (
         SettlementStatus.PENDING.value,
         SettlementStatus.FLUSHING.value,
         SettlementStatus.CONFIRMED.value,
+        SettlementStatus.NEEDS_REVIEW.value,
     )
     total_plays = (
         db.query(func.count(Settlement.id))
@@ -658,6 +659,28 @@ async def refund_campaign(
                 f"pending settlements not yet flushed "
                 f"(pending={flush_result.left_pending_rows}, "
                 f"failures={len(flush_result.failures)}); retry refund shortly"
+            ),
+        )
+
+    # Refuse refund if any rows are NEEDS_REVIEW — those have ambiguous
+    # on-chain state. Refunding now would either over-pay (if the original
+    # broadcast landed and we send `budget - spent` not knowing the wallet
+    # already paid out) or under-credit the publisher (if the broadcast
+    # didn't land). Operator must triage via scripts/triage_stuck.py first.
+    needs_review_count = (
+        db.query(Settlement)
+        .filter(
+            Settlement.campaign_id == c.id,
+            Settlement.status == SettlementStatus.NEEDS_REVIEW.value,
+        )
+        .count()
+    )
+    if needs_review_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"campaign has {needs_review_count} settlement(s) requiring manual "
+                f"review (run scripts/triage_stuck.py before refunding)"
             ),
         )
 

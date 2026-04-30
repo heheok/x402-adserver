@@ -28,11 +28,23 @@ class SettlementStatus(str, Enum):
     # and emits one Solana tx per group every BATCH_FLUSH_INTERVAL_SECONDS.
     PENDING = "pending"
     # Atomically claimed by a flusher (loop or refund-handler). Only the
-    # claimer processes the row. On retryable failure the row goes back
-    # to PENDING for the next loop; on confirm it goes to CONFIRMED.
+    # claimer processes the row.
     FLUSHING = "flushing"
     CONFIRMED = "confirmed"
+    # _compensate_failed terminal state: tx definitively did NOT broadcast
+    # (clean Privy refusal pre-broadcast). `spent` is decremented to release
+    # the reservation back to the campaign budget.
     FAILED = "failed"
+    # Terminal state for rows whose on-chain fate is ambiguous: process
+    # died mid-flush, or Privy returned a "post-broadcast uncertain" error
+    # (5xx after broadcast, or 400 "reference_id already exists"). DO NOT
+    # auto-claim, DO NOT auto-compensate — re-broadcasting drains the
+    # campaign wallet because Privy's reference_id check fires after
+    # broadcast, not before (verified 2026-04-30, see PLAN.md must-fix #4).
+    # Operator triages via scripts/triage_stuck.py: looks up the original
+    # tx on Solscan, then either marks the row CONFIRMED with the
+    # discovered tx hash or compensates if the tx genuinely never landed.
+    NEEDS_REVIEW = "needs_review"
 
 
 class Campaign(Base):
