@@ -72,6 +72,7 @@ single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. T
 - [ ] `DOMAIN=your-domain.com docker compose -f docker-compose.prod.yml up -d --build`
 - [ ] Verify Let's Encrypt cert provisions on first boot (port 80 reachable for HTTP-01)
 - [ ] Smoke test the full demo loop on the live URL
+- [ ] **Nightly SQLite backup → GCS bucket.** Cron on the VM (or a Cloud Scheduler hitting a tiny Cloud Function): `docker compose exec -T backend sqlite3 /app/data/adserver.db ".backup /app/data/snap.db"` then `gsutil cp /app/data/snap.db gs://x402-db-backups/$(date +%F).db`. Use `.backup` (handles concurrent writes), not raw file copy. ~7 day retention via lifecycle rule on the bucket. ~$0/mo at this DB size. Cheap insurance against disk failure, accidental `rm`, or a botched migration during demo prep.
 - [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo
 - [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function
 
