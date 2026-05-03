@@ -15,9 +15,14 @@
 export const MICRO = 1_000_000;
 const MICRO_BIG = 1_000_000n;
 
-/** Format a microUSDC string for display (default 4 decimal places).
- *  BigInt-native — overflow-proof at any scale. */
-export function formatUsdc(microStr: string, dp: number = 4): string {
+/** Format a microUSDC string for display (default 6 decimal places — full
+ *  microUSDC precision). BigInt-native — overflow-proof at any scale.
+ *
+ *  Default bumped from 4 → 6 so per-play amounts at sub-cent CPMs render
+ *  the full precision (e.g. 50 micro = $0.000050 instead of truncating to
+ *  "0.0000"). Callers showing whole-dollar summaries (campaign totals,
+ *  CPM, escrow, faucet topline) explicitly pass `dp=2` to stay compact. */
+export function formatUsdc(microStr: string, dp: number = 6): string {
   const micro = BigInt(microStr);
   const negative = micro < 0n;
   const abs = negative ? -micro : micro;
