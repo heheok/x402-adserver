@@ -79,19 +79,36 @@ export default function WalletChip() {
     },
   });
 
-  // Clear the pending indicator when the new balance lands. The 1e-6
-  // tolerance is a UI signal, not a money-correctness check — so float USDC
-  // is fine here.
+  // Clear the "Confirming…" state as soon as the balance has visibly
+  // increased from the pre-faucet snapshot. We don't require the new
+  // balance to match `balanceBefore + pendingAmount` exactly — devnet RPC
+  // lag, batched on-chain credits, and the chip's polling cadence make
+  // exact matches flaky and used to leave the button stuck at "Confirming…"
+  // even after funds had arrived. Any visible bump means the deposit
+  // landed; that's enough to re-enable the button.
   useEffect(() => {
     if (pendingAmount === null || balanceBefore === null) return;
     const current = wallet.data?.usdc_balance;
     if (current === undefined) return;
     const currentUsdc = parseUsdc(current);
-    if (currentUsdc >= balanceBefore + pendingAmount - 1e-6) {
+    if (currentUsdc > balanceBefore + 1e-6) {
       setPendingAmount(null);
       setBalanceBefore(null);
     }
   }, [wallet.data?.usdc_balance, pendingAmount, balanceBefore]);
+
+  // Hard fallback: if RPC propagation never reflects the new balance for
+  // any reason, force-clear the pending state 25s after onSuccess so the
+  // button doesn't stay stuck forever. The wallet polling window is 20s,
+  // so 25s leaves a small buffer beyond the last possible refetch.
+  useEffect(() => {
+    if (pendingAmount === null) return;
+    const t = window.setTimeout(() => {
+      setPendingAmount(null);
+      setBalanceBefore(null);
+    }, 25_000);
+    return () => window.clearTimeout(t);
+  }, [pendingAmount]);
 
   // Close dropdown on outside click + ESC.
   useEffect(() => {

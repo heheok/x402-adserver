@@ -64,10 +64,19 @@ async def faucet(
     # Lifetime cap enforcement. Pending counts toward the cap so a user
     # spamming the button during the broadcast window can't bypass it.
     # Failed rows do NOT count (Privy refused pre-broadcast — no funds left).
+    # Returned rows do NOT count (advertiser already drained back to treasury
+    # via POST /api/faucet/reset).
     spent_micro = db.scalar(
         select(func.coalesce(func.sum(FaucetClaim.amount_usdc), 0))
         .where(FaucetClaim.advertiser_id == advertiser.user_id)
-        .where(FaucetClaim.status != FaucetClaimStatus.FAILED.value)
+        .where(
+            FaucetClaim.status.in_(
+                [
+                    FaucetClaimStatus.PENDING.value,
+                    FaucetClaimStatus.CONFIRMED.value,
+                ]
+            )
+        )
     ) or 0
 
     if spent_micro + faucet_amount_micro > cap_micro:
@@ -117,3 +126,35 @@ async def faucet(
     db.commit()
 
     return FaucetResponse(amount=micro_str(faucet_amount_micro), tx_hash=tx_hash)
+
+
+@router.post("/faucet/reset", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_faucet(
+    advertiser: AdvertiserIdentity = Depends(require_advertiser),
+    db: Session = Depends(get_db),
+) -> None:
+    """Release the calling advertiser's faucet cap.
+
+    Called by the dashboard after a user-initiated drain-to-treasury (the
+    user wallet's USDC has been returned to the treasury), so the lifetime
+    cap doesn't keep blocking them. Marks every PENDING + CONFIRMED claim
+    for this advertiser as RETURNED — preserved for audit, excluded from
+    the cap math.
+
+    Trust model (intentional, demo scope): no on-chain verification of an
+    actual return tx. Cycling drain → reset → faucet doesn't net the user
+    any USDC; the only cost is broadcast gas (Privy-sponsored). If/when
+    we move to mainnet this should take a tx_hash and verify on Solana
+    that it's a recent USDC transfer from this advertiser's wallet to
+    the treasury for at least the released amount.
+    """
+    db.query(FaucetClaim).filter(
+        FaucetClaim.advertiser_id == advertiser.user_id,
+        FaucetClaim.status.in_(
+            [FaucetClaimStatus.PENDING.value, FaucetClaimStatus.CONFIRMED.value]
+        ),
+    ).update(
+        {FaucetClaim.status: FaucetClaimStatus.RETURNED.value},
+        synchronize_session=False,
+    )
+    db.commit()

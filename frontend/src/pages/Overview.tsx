@@ -531,7 +531,7 @@ function Empty({ onNewCampaign }: { onNewCampaign: () => void }) {
             ad and settle every play on Solana.
           </div>
           <button
-            className="x-btn x-btn-primary x-btn-lg"
+            className="x-btn x-btn-grad x-btn-lg"
             style={{ marginTop: 22 }}
             onClick={onNewCampaign}
           >

@@ -126,6 +126,10 @@ class FaucetClaimStatus(str, Enum):
     CONFIRMED = "confirmed"
     # Privy refused before broadcast — cap is NOT charged for this attempt.
     FAILED = "failed"
+    # Advertiser returned the funds (drain-to-treasury). Released from the
+    # cap so they can faucet again. Set via POST /api/faucet/reset; the
+    # row is preserved for audit trail rather than deleted.
+    RETURNED = "returned"
 
 
 class FaucetClaim(Base):

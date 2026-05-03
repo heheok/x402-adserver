@@ -50,7 +50,7 @@ export default function TabRow({ tab, onTabChange, onNewCampaign }: Props) {
         </button>
       ))}
       <div style={{ flex: 1 }} />
-      <button className="x-btn x-btn-primary x-btn-sm" onClick={onNewCampaign}>
+      <button className="x-btn x-btn-grad x-btn-sm" onClick={onNewCampaign}>
         <Icon name="plus" size={12} stroke={2} /> New campaign
       </button>
     </div>
