@@ -1,11 +1,23 @@
 # Prod-shape compose. Used both for local validation of the production
 # topology (Caddy + static frontend + locked-down backend) and for the
-# eventual GCE VM deploy. Domain controlled by the DOMAIN env var:
-#   - unset / "localhost" → Caddy issues a local self-signed cert
-#   - real hostname       → Caddy fetches a Let's Encrypt cert on first boot
+# GCE VM deploy. Two TLS modes via the CADDYFILE build arg:
 #
-# Local: `docker compose -f docker-compose.prod.yml up -d --build`
-# Prod : `DOMAIN=your-domain.com docker compose -f docker-compose.prod.yml up -d --build`
+#   - CADDYFILE=Caddyfile (default)
+#     Auto-TLS for {$DOMAIN:localhost}. Local CA when DOMAIN=localhost,
+#     Let's Encrypt for a real domain (only works if the host is publicly
+#     reachable on port 80 and the DNS A record points here directly —
+#     i.e. NOT behind Cloudflare orange-cloud).
+#
+#   - CADDYFILE=Caddyfile.cloudflare
+#     Static TLS via the Cloudflare Origin Cert. Required for the
+#     orange-cloud (proxied) deploy: CF terminates browser TLS at its
+#     edge, validates this cert on the CF→origin hop (Full strict),
+#     and forwards. Cert files come from ./backend/.secrets/cf-origin/
+#     (gitignored).
+#
+# Local validation: `docker compose -f docker-compose.prod.yml up -d --build`
+# GCE deploy     : `CADDYFILE=Caddyfile.cloudflare DOMAIN=solboards.xyz \
+#                    docker compose -f docker-compose.prod.yml up -d --build`
 
 services:
   backend:
@@ -27,12 +39,14 @@ services:
 
   caddy:
     # Multi-stage image: builds the SPA inside node:20-alpine, then bakes
-    # the static dist/ + Caddyfile into a caddy:2-alpine layer. Build
-    # context is the repo root so the image can pull both frontend/ and
-    # the top-level Caddyfile.
+    # the static dist/ + selected Caddyfile into a caddy:2-alpine layer.
+    # Build context is the repo root so the image can pull both frontend/
+    # and the top-level Caddyfile(.cloudflare).
     build:
       context: .
       dockerfile: frontend/Dockerfile.prod
+      args:
+        CADDYFILE: ${CADDYFILE:-Caddyfile}
     container_name: solboards-caddy
     ports:
       - "80:80"
@@ -41,9 +55,14 @@ services:
       - DOMAIN=${DOMAIN:-localhost}
     volumes:
       # caddy_data holds Let's Encrypt certs + the local CA. Persisting it
-      # avoids re-issuing on every restart (LE has rate limits).
+      # avoids re-issuing on every restart (LE has rate limits). Unused
+      # when CADDYFILE=Caddyfile.cloudflare (static cert), but harmless.
       - caddy_data:/data
       - caddy_config:/config
+      # Cloudflare Origin Cert. Only consumed when CADDYFILE=Caddyfile.cloudflare;
+      # the dev-validation Caddyfile ignores this path. Bind mount is :ro and
+      # the source dir is gitignored (backend/.secrets/).
+      - ./backend/.secrets/cf-origin:/etc/caddy/cf-origin:ro
     depends_on:
       - backend
     restart: unless-stopped

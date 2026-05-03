@@ -1,0 +1,41 @@
+{$DOMAIN:solboards.xyz} {
+	# Static cert provided by Cloudflare's Origin CA (15-year ECDSA, signed
+	# by Cloudflare's private CA). Browsers don't trust this CA, but
+	# Cloudflare does — when CF SSL/TLS mode is "Full (strict)", CF
+	# validates this cert on the CF→origin hop. Browsers see CF's
+	# Universal SSL cert (handled at the edge), never this one.
+	#
+	# Cert files mounted via docker-compose.prod.yml from
+	# ./backend/.secrets/cf-origin/ on the host.
+	tls /etc/caddy/cf-origin/origin.pem /etc/caddy/cf-origin/origin.key
+
+	encode zstd gzip
+
+	# Solana RPC proxy — same rationale as Caddyfile (dev/local-validation
+	# variant). Browsers can't always hit api.devnet.solana.com directly
+	# (origin-specific CORS, per-IP rate limits). Server-side proxy makes
+	# the call same-origin and shifts rate-limit attribution to the VM.
+	@solana_rpc path /solana-rpc /solana-rpc/*
+	handle @solana_rpc {
+		uri strip_prefix /solana-rpc
+		reverse_proxy https://api.devnet.solana.com {
+			header_up Host api.devnet.solana.com
+			# Solana's public RPC anti-abuse layer 403s any request whose
+			# Origin/Referer isn't on its allowlist. Stripping both makes
+			# the upstream see a clean server-side call.
+			header_up -Origin
+			header_up -Referer
+		}
+	}
+
+	@backend path /api/* /health /bid /proof
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

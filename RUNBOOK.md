@@ -104,17 +104,28 @@ old JS bundle is otherwise cached and you'll see stale behavior.
 
 ### Set DOMAIN for non-localhost testing
 
-Caddy reads `${DOMAIN}` from the compose env (defaults to `localhost`). For
-testing with a real domain that resolves to your machine, or against a
-staging hostname:
+Caddy reads `${DOMAIN}` from the compose env (defaults to `localhost`).
+There are also two TLS modes selected via `CADDYFILE`:
+
+- `CADDYFILE=Caddyfile` (default) — auto-TLS. Local CA when DOMAIN is
+  `localhost`, otherwise Let's Encrypt via HTTP-01. Use this only for
+  staging hosts that point directly at the VM (no Cloudflare proxy in
+  front).
+- `CADDYFILE=Caddyfile.cloudflare` — static TLS via the Cloudflare Origin
+  Cert mounted from `backend/.secrets/cf-origin/`. This is what the GCE
+  deploy uses (CF orange-cloud + Full strict). Locally you can test the
+  exact prod image by faking the cert dir with self-signed files.
 
 ```bash
-DOMAIN=staging.your-domain.com docker compose -f docker-compose.prod.yml up -d --build
+# Staging host on a real domain WITHOUT Cloudflare in front (rare):
+DOMAIN=staging.solboards.xyz docker compose -f docker-compose.prod.yml up -d --build
+
+# Reproduce the prod CF-fronted image locally (with a placeholder cert):
+CADDYFILE=Caddyfile.cloudflare docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-Caddy will switch from local CA to Let's Encrypt for any non-localhost
-domain. Port 80 must be reachable from the public internet for the HTTP-01
-challenge.
+Port 80 must be publicly reachable for HTTP-01 (auto-TLS path only). The
+Cloudflare path doesn't need any LE plumbing.
 
 ### Solana RPC 403 ("Access forbidden")
 
@@ -138,6 +149,55 @@ curl -sk -X POST -H "Content-Type: application/json" -H "Origin: https://localho
 
 See `worklog/session-17.md` and `memory/project_x402_solana_rpc_origin_strip.md`
 for the full diagnostic.
+
+### Cloudflare Origin Cert (prod TLS)
+
+The GCE deploy uses CF orange-cloud (proxied) with **Full (strict)** SSL
+mode. CF Universal SSL handles browser-facing TLS at the edge; Caddy
+serves a 15-year ECDSA Origin Cert that CF validates on the CF→origin
+hop. No Let's Encrypt anywhere.
+
+**Files**
+
+```
+backend/.secrets/cf-origin/origin.pem    # certificate, public
+backend/.secrets/cf-origin/origin.key    # private key, chmod 600
+```
+
+Both are gitignored under `backend/.secrets/`. The compose bind-mounts
+the dir into Caddy at `/etc/caddy/cf-origin/:ro`. Only consumed when
+`CADDYFILE=Caddyfile.cloudflare`.
+
+**Generate / regenerate**
+
+CF dashboard → SSL/TLS → Origin Server → Create Certificate:
+- Private key type: **ECC** (= ECDSA P-256, smaller + faster than RSA)
+- Hostnames: `solboards.xyz, *.solboards.xyz`
+- Validity: **15 years**
+- Save both files immediately — the private key is shown only once.
+
+**Cache rules (matters for demo-day rebuilds)**
+
+CF caches static responses by default. Without exceptions, judges may
+see stale `index.html` after a deploy. CF dashboard → Caching → Cache
+Rules:
+- `URI Path matches "/index.html"` → bypass cache
+- `URI Path starts with "/api/"` → bypass cache
+- Static hashed assets (`/assets/*-[hash].js`) keep CF's default cache —
+  Vite's content hashing makes them safely cacheable.
+
+If you forget to set the rules and ship a stale-looking deploy, manual
+purge: CF dashboard → Caching → Configuration → Purge Everything (or
+purge by URL).
+
+**Rotate (15 years from now, or sooner if compromised)**
+
+1. CF dashboard → SSL/TLS → Origin Server → revoke the old cert.
+2. Generate a new one (same steps as above).
+3. Replace `backend/.secrets/cf-origin/origin.pem` + `origin.key` on the
+   VM.
+4. `docker compose -f docker-compose.prod.yml restart caddy` to pick up
+   the new files (Caddy reads them on boot).
 
 ---
 

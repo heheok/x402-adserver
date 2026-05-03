@@ -33,5 +33,17 @@ RUN npm run build
 # ---
 
 FROM caddy:2-alpine
+
+# CADDYFILE selects which Caddyfile gets baked into the image:
+#   - `Caddyfile`            (default) auto-TLS for {$DOMAIN:localhost} —
+#                            local validation against the prod compose,
+#                            uses Caddy's local CA when DOMAIN=localhost.
+#   - `Caddyfile.cloudflare` static TLS via the Cloudflare Origin Cert
+#                            mounted at /etc/caddy/cf-origin/ — used for
+#                            the GCE deploy with CF orange-cloud + Full
+#                            (strict). Cert files are NOT in the image;
+#                            they're bind-mounted via compose.
+ARG CADDYFILE=Caddyfile
+
 COPY --from=builder /app/dist /srv/frontend
-COPY Caddyfile /etc/caddy/Caddyfile
+COPY ${CADDYFILE} /etc/caddy/Caddyfile

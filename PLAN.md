@@ -62,21 +62,27 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 ### Session 18 — Deploy to GCE VM (domain: solboards.xyz)
 
 **Topology (decided 2026-04-30, replacing earlier Cloud Run + Cloud SQL plan — see worklog/session-17.md for the why):**
-single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. Three containers — backend (FastAPI on internal docker network), caddy (TLS via Let's Encrypt + static SPA + reverse proxy on 80/443), and the multi-stage `x402-web` image baking the Vite build into Caddy. SQLite stays on the VM's persistent disk; no Postgres migration. ~$13/mo against GCP free-trial credits.
+single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. Three containers — backend (FastAPI on internal docker network), caddy (TLS terminator + static SPA + reverse proxy on 80/443), and the multi-stage `x402-web` image baking the Vite build into Caddy. SQLite stays on the VM's persistent disk; no Postgres migration. ~$13/mo against GCP free-trial credits.
+
+**TLS path (decided 2026-05-03):** Cloudflare orange-cloud (proxied) + **CF Origin Cert** baked into Caddy. CF Universal SSL handles browser TLS at the edge; Caddy serves a 15-year ECDSA Origin Cert that CF validates on the CF→origin hop ("Full (strict)"). No Let's Encrypt anywhere. CF benefits we get: hidden origin IP, edge caching, DDoS shield. Repo prep already shipped (Caddyfile.cloudflare + Dockerfile.prod CADDYFILE build arg + compose mount of `backend/.secrets/cf-origin/`).
 
 - [x] Decide domain — **solboards.xyz** (registered, DNS on Cloudflare). Locked 2026-05-03.
-- [ ] Decide Cloudflare proxy mode — gray-cloud (DNS-only, Caddy does HTTP-01 directly) is simplest and matches the local prod compose; orange-cloud requires switching Caddy to the `caddy-dns/cloudflare` build + a CF API token for DNS-01. Current vote: gray-cloud for the hackathon.
-- [ ] Provision GCE e2-small VM (us-central1, Debian 12), install Docker
-- [ ] Reserve static external IP, point Cloudflare A record `solboards.xyz` (and `www`) at it
-- [ ] Firewall: 80/443 from 0.0.0.0/0, 22 from operator IP (or via IAP-tunneled SSH)
-- [ ] Push `x402-web` image to Artifact Registry (or build on the VM)
-- [ ] `scp` `backend/.env` + `backend/.secrets/` to the VM (Secret Manager deferred — fine for hackathon devnet)
-- [ ] `DOMAIN=solboards.xyz docker compose -f docker-compose.prod.yml up -d --build`
-- [ ] Verify Let's Encrypt cert provisions on first boot (port 80 reachable for HTTP-01; gray-cloud required if proxy mode wasn't already set)
-- [ ] Smoke test the full demo loop on the live URL
+- [x] Decide Cloudflare proxy mode — **orange-cloud + CF Origin Cert** (Full strict). Locked 2026-05-03.
+- [x] Generate CF Origin Cert (ECC, 15 years, hostnames `solboards.xyz, *.solboards.xyz`) — saved to `backend/.secrets/cf-origin/origin.pem` + `origin.key`, with offsite backup.
+- [ ] In CF dashboard: SSL/TLS → Overview → set encryption mode to **Full (strict)**.
+- [ ] In CF dashboard: Caching → Cache Rules → bypass cache for `URI Path matches "/index.html"` and `URI Path starts with "/api/"`. Static hashed assets (`/assets/*-[hash].js`) keep CF's default cache.
+- [ ] Provision GCE e2-small VM (us-central1, Debian 12), install Docker.
+- [ ] Reserve static external IP. In CF DNS: set A record `solboards.xyz` to that IP, **proxied (orange)**. Add `www` as A or CNAME, also proxied.
+- [ ] Firewall: 80/443 from 0.0.0.0/0 (CF still hits 80/443 on origin), 22 from operator IP (or via IAP-tunneled SSH). Could tighten 80/443 to CF's published IP ranges later, deferred.
+- [ ] Build & push the `x402-web` image to Artifact Registry (or build on the VM). Build with `CADDYFILE=Caddyfile.cloudflare`.
+- [ ] `scp -r backend/.env backend/.secrets/ vm:~/x402/backend/` (includes the CF Origin Cert dir + Privy creds + GCS SA key).
+- [ ] `chmod 600` on `backend/.secrets/cf-origin/origin.key` on the VM.
+- [ ] `CADDYFILE=Caddyfile.cloudflare DOMAIN=solboards.xyz docker compose -f docker-compose.prod.yml up -d --build`
+- [ ] Verify the CF→origin handshake: `curl -kI https://<vm-ip>/` should return 200 with the CF Origin cert; `curl -I https://solboards.xyz/` should return 200 with CF's edge cert (header `cf-ray` present).
+- [ ] Smoke test the full demo loop on `https://solboards.xyz`.
 - [ ] **Nightly SQLite backup → GCS bucket.** Cron on the VM (or a Cloud Scheduler hitting a tiny Cloud Function): `docker compose exec -T backend sqlite3 /app/data/adserver.db ".backup /app/data/snap.db"` then `gsutil cp /app/data/snap.db gs://x402-db-backups/$(date +%F).db`. Use `.backup` (handles concurrent writes), not raw file copy. ~7 day retention via lifecycle rule on the bucket. ~$0/mo at this DB size. Cheap insurance against disk failure, accidental `rm`, or a botched migration during demo prep.
-- [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo
-- [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function
+- [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo.
+- [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function.
 
 ### Session 19 — Demo rehearsal + submission
 
