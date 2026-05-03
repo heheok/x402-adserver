@@ -1176,6 +1176,7 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 | `TREASURY_WALLET_ID`              | Privy wallet id (after `bootstrap_treasury`)              | 2              |
 | `TREASURY_WALLET_ADDRESS`         | Solana address of the treasury wallet                     | 2              |
 | `FAUCET_AMOUNT_USDC`              | How much USDC the faucet hands out per call               | 2              |
+| `FAUCET_LIFETIME_CAP_USDC`        | Lifetime per-Privy-DID drain ceiling (default 100)        | 19             |
 | `HELPER_WALLET_IDS`               | CSV of helper Privy wallet ids (sweep source)             | 12             |
 | `HELPER_WALLET_ADDRESSES`         | CSV of helper Solana addresses (matching order)           | 12             |
 | `PUBLISHER_API_KEY`               | Publisher API key for `/bid` and `/proof`                 | 1              |
@@ -1206,6 +1207,30 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 `TREASURY_WALLET_ID` or `TREASURY_WALLET_ADDRESS` is missing/wrong in `.env`.
 Re-check `docker compose exec backend env | grep TREASURY`, then recreate
 (not restart) the container: `docker compose up -d --force-recreate backend`.
+
+### `faucet lifetime cap reached` (429 on `/api/faucet`)
+
+Advertiser hit `FAUCET_LIFETIME_CAP_USDC` (default 100). The cap counts
+`PENDING + CONFIRMED` rows in `faucet_claims` for that Privy DID;
+`FAILED` rows don't count, `RETURNED` rows don't count. To clear the cap
+for one advertiser without changing the env (e.g. judge ran out mid-demo):
+
+```sql
+DELETE FROM faucet_claims WHERE advertiser_id='did:privy:...';
+```
+
+On the VM:
+```bash
+docker compose -f docker-compose.prod.yml exec backend \
+  sqlite3 /app/data/adserver.db \
+  "DELETE FROM faucet_claims WHERE advertiser_id='did:privy:XXX';"
+```
+
+Alternatively, the user can drain their wallet to treasury via their own
+client; `POST /api/faucet/reset` (called automatically after a successful
+drain, or manually with their bearer token) marks the caller's outstanding
+claims as `RETURNED` and releases the cap. Trust-based for the demo —
+no on-chain verification of the drain tx — see `BUSINESS-CONSTRAINTS.md §6`.
 
 ### `PRIVY_APP_ID and PRIVY_APP_SECRET must be set`
 

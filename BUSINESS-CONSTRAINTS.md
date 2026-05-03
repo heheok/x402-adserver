@@ -8,7 +8,7 @@ Pairs with `BACKGROUND-INFORMATION.md` (product spec + architectural rationale)
 and `PLAN.md` (engineering roadmap + open decisions). When figures here disagree
 with those, treat `PLAN.md` as truth and flag the drift.
 
-Last reviewed: 2026-04-24.
+Last reviewed: 2026-05-03.
 
 ---
 
@@ -291,10 +291,28 @@ here with business framing.
 - **Recommendation:** shared DB, two FastAPI apps in the same process (~1
   session of work). Deferred until we have pressure to decouple.
 
-### Faucet rate limiting
-- **What:** today `/api/faucet` will serve as often as called. Needs a
-  per-user per-hour cap before we demo publicly to prevent treasury drain.
-- **Status:** noted as a Session 2 leftover, currently not gated.
+### Faucet rate limiting (decided 2026-05-03)
+- **What shipped:** `POST /api/faucet` now enforces a **lifetime per-Privy-DID
+  cap** in microUSDC. Cap is tunable via the `FAUCET_LIFETIME_CAP_USDC` env
+  var (default 100 USDC). Each call inserts a `faucet_claims` row at status
+  `PENDING` before the Privy transfer fires; the cap query sums `PENDING +
+  CONFIRMED` rows so spam-clicks during the broadcast window can't bypass
+  the limit. `FAILED` rows (Privy refused pre-broadcast — no funds moved)
+  do **not** count.
+- **Cap-release on return:** `POST /api/faucet/reset` (auth required, 204)
+  marks the caller's outstanding claims as `RETURNED` so a user who drains
+  their wallet back to treasury can faucet again. Trust-based for the demo
+  scope — no on-chain verification of the return tx — because cycling
+  drain ↔ faucet doesn't net the user any USDC, only burns broadcast gas
+  (Privy-sponsored). Mainnet would require tx_hash verification.
+- **Manual override** if a judge actually needs more during the demo:
+  `DELETE FROM faucet_claims WHERE advertiser_id='did:privy:...';` on the
+  VM. SQLite, no migration.
+- **Production note:** `/api/faucet` itself does not ship to production
+  (advertisers bring their own USDC); the cap infrastructure is demo-only
+  but the underlying audit pattern (claims table, atomic insert before
+  side-effect, idempotent failure marking) is the right shape for any
+  production write that affects external state.
 
 ### Demo CPM lock (decided 2026-04-24)
 - **What:** demo CPM is fixed at **$0.50** ($0.0005/play, 500 base units of
