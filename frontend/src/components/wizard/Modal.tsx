@@ -42,6 +42,31 @@ export default function Modal({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose, closeDisabled]);
 
+  // Lock body scroll while the modal is open. Without this, scrolling
+  // inside the modal also scrolls the page beneath it, and on mobile
+  // the browser's pull-to-refresh fires when the modal is scrolled to
+  // the top. `overscroll-behavior: contain` blocks that bubble.
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const prev = {
+      htmlOverflow: html.style.overflow,
+      htmlOverscroll: html.style.overscrollBehavior,
+      bodyOverflow: body.style.overflow,
+      bodyOverscroll: body.style.overscrollBehavior,
+    };
+    html.style.overflow = "hidden";
+    html.style.overscrollBehavior = "contain";
+    body.style.overflow = "hidden";
+    body.style.overscrollBehavior = "contain";
+    return () => {
+      html.style.overflow = prev.htmlOverflow;
+      html.style.overscrollBehavior = prev.htmlOverscroll;
+      body.style.overflow = prev.bodyOverflow;
+      body.style.overscrollBehavior = prev.bodyOverscroll;
+    };
+  }, []);
+
   return (
     <div
       style={{

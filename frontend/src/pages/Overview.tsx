@@ -564,7 +564,7 @@ function Empty({ onNewCampaign }: { onNewCampaign: () => void }) {
           {
             n: "02",
             t: "Fund",
-            d: "Sign one x402 transfer. We provision a campaign wallet on Solana.",
+            d: "One x402 transfer escrows your budget into a fresh campaign wallet on Solana.",
           },
           {
             n: "03",
