@@ -20,19 +20,6 @@ import Progress from "./ui/Progress";
 import Solscan from "./ui/Solscan";
 import StatusBadge from "./ui/StatusBadge";
 
-type SimulatePlayResponse = {
-  amount_usdc: string; // microUSDC string
-  // Session 16.8: tx_hash + solscan_url are null on the immediate response
-  // (status="pending"); they fill in once the batch settler flushes the row,
-  // visible via the next /stats poll.
-  tx_hash: string | null;
-  solscan_url: string | null;
-  publisher_wallet: string;
-  dma?: string | null;
-  settlement_id?: string | null;
-  status?: string;
-};
-
 type RefundResponse = {
   refund_amount: string; // microUSDC string
   tx_hash: string | null;
@@ -89,18 +76,6 @@ export default function CampaignCard({
     qc.invalidateQueries({ queryKey: ["campaign-stats", campaign.id] });
   }
 
-  const simulate = useMutation({
-    mutationFn: async () => {
-      const r = await authedApi.post<SimulatePlayResponse>(
-        `/api/campaigns/${campaign.id}/simulate-play`,
-      );
-      return r.data;
-    },
-    onMutate: () => setActionError(null),
-    onSuccess: invalidateCampaign,
-    onError: (err: Error) => setActionError(humanizeError(err)),
-  });
-
   const pause = useMutation({
     mutationFn: async () => {
       await authedApi.post(`/api/campaigns/${campaign.id}/pause`);
@@ -139,11 +114,7 @@ export default function CampaignCard({
   const budgetUsdc = parseUsdc(campaign.budget);
   const spentUsdc = parseUsdc(campaign.spent);
   const pct = budgetUsdc > 0 ? spentUsdc / budgetUsdc : 0;
-  const busy =
-    simulate.isPending ||
-    pause.isPending ||
-    resume.isPending ||
-    refund.isPending;
+  const busy = pause.isPending || resume.isPending || refund.isPending;
 
   const dmaSummary =
     campaign.target_dmas && campaign.target_dmas.length > 0
@@ -336,24 +307,14 @@ export default function CampaignCard({
             }}
           >
             {campaign.status === "active" && (
-              <>
-                <button
-                  className="x-btn x-btn-sm"
-                  onClick={() => simulate.mutate()}
-                  disabled={busy}
-                >
-                  <Icon name="play" size={11} />{" "}
-                  {simulate.isPending ? "Playing…" : "Simulate play"}
-                </button>
-                <button
-                  className="x-btn x-btn-sm"
-                  onClick={() => pause.mutate()}
-                  disabled={busy}
-                >
-                  <Icon name="pause" size={11} />{" "}
-                  {pause.isPending ? "Pausing…" : "Pause"}
-                </button>
-              </>
+              <button
+                className="x-btn x-btn-sm"
+                onClick={() => pause.mutate()}
+                disabled={busy}
+              >
+                <Icon name="pause" size={11} />{" "}
+                {pause.isPending ? "Pausing…" : "Pause"}
+              </button>
             )}
             {campaign.status === "paused" && (
               <>

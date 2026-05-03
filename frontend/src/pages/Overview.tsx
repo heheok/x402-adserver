@@ -56,9 +56,9 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
   });
 
   // Always poll while the Overview tab is mounted — plays can come from
-  // auto-play, /api/campaigns/:id/simulate-play, or real publisher /proof
-  // calls, none of which we can predict from a single config flag. 5s is
-  // cheap at demo scale (≤10 campaigns) and keeps the totals visibly live.
+  // auto-play or real publisher /proof calls, none of which we can predict
+  // from a single config flag. 5s is cheap at demo scale (≤10 campaigns)
+  // and keeps the totals visibly live.
   // When auto-play is on we tighten to its tick so settlements land on the
   // same rhythm the user sees in the activity feed.
   const pollMs = autoPlay.data?.enabled
