@@ -85,6 +85,42 @@ single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. T
 - [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo.
 - [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function.
 
+### Session 18.7 — Responsive design pass (3 breakpoints)
+
+Currently desktop-only (was scoped that way through Sessions 13-16). Decision 2026-05-03: do real responsive (not a tactical "doesn't look broken" pass) before submission so the dashboard works on phone + tablet too. Hackathon judges typically review on desktop, but a B2B advertiser dashboard *should* work everywhere, and it's a polish item that pays off post-hackathon if we keep building.
+
+**Breakpoints:**
+
+| Name    | Range          | Target                        |
+|---------|----------------|-------------------------------|
+| Mobile  | `< 640px`      | iPhone, small Android         |
+| Tablet  | `640–1023px`   | iPad portrait, phones landscape |
+| Desktop | `≥ 1024px`     | Current design (unchanged)    |
+
+**Implementation approach:**
+
+- Add breakpoint variables + container queries to `frontend/src/styles/tokens.css`. Standard `@media (max-width: 640px)` patterns.
+- Most layouts use inline styles with explicit grid-template-columns / flexbox. Refactor only the grids that break on mobile to utility classes (`.x-grid-2`, `.x-grid-3`, etc. that collapse to single column under the breakpoint), leave per-component styling alone.
+- Test in Chrome devtools' device toolbar at 375px, 768px, 1280px. No actual device required, but a real iPhone smoke-test before shipping helps.
+
+**Per-page scope:**
+
+- [ ] **Login**: trivial (already a centered card), should mostly just work — verify and move on.
+- [ ] **AppHeader**: collapse to a compact mobile shape — logo + wallet chip only, no text. Tablet keeps the current full layout.
+- [ ] **Overview page**: stat-card grid stacks single-column on mobile, 2-col on tablet. Sparklines shrink. "Recent activity" rows already work as flex.
+- [ ] **Campaigns list**: card grid → single column on mobile, 2-col on tablet.
+- [ ] **Campaign wizard (5 steps)**:
+  - StepImage: upload box stays full-width, preview scales.
+  - StepDetails / StepCalculator / StepSchedule: form-row grids collapse to single column.
+  - StepTargeting: DMA pickers + map. **Map kept on all breakpoints** — display-only, no interaction, so no touch-target concerns. Just shrink the map height and let DMA chips wrap.
+  - StepReview: summary table → stacked rows on mobile.
+- [ ] **Live activity map (Overview)**: keep at all breakpoints. Shrink to ~40vh on mobile, full-width.
+- [ ] Wizard sidebar / breadcrumbs: keep horizontal at all sizes (already wraps), just reduce padding on mobile.
+
+**Estimate:** 8-12h focused work. Don't start until faucet rate-limit (Session 19's first item) is shipped.
+
+---
+
 ### Session 19 — Pre-demo polish + submission
 
 - [ ] **Faucet rate-limit / cap per advertiser** (security, must-ship before judges hit the URL). Currently `POST /api/faucet` is unrestricted: any logged-in user can drain the treasury. Treasury refill rate is capped at 20 USDC / 2h by the Circle devnet faucet, so an unbounded faucet is a real DoS surface even with a single bad actor. Plan: new `faucet_claims` table (id, advertiser_id, advertiser_wallet, amount_usdc, tx_hash, status, created_at), per-advertiser running total enforced in the route: **cap at 100 USDC per Privy DID, lifetime** (= 10 calls at 10 USDC each — generous-enough headroom for testing, hard ceiling against drain). Reject with 429 if `SUM(amount_usdc) WHERE advertiser_id=... AND status='confirmed' >= 100_000_000`. SQLAlchemy `create_all` handles schema on next backend boot (SQLite, no migration). If any judge actually needs more during the demo, manual fix is `DELETE FROM faucet_claims WHERE advertiser_id='did:privy:...'` on the VM.
