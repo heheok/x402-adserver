@@ -190,8 +190,15 @@ async def create_campaign(
             )
 
         try:
+            # Idempotency key is sent as the `privy-idempotency-key` HTTP
+            # header; httpx rejects non-ASCII bytes there. We previously
+            # interpolated body.name for debug visibility, but advertisers
+            # legitimately type non-ASCII campaign names (e.g. Turkish "ı"
+            # in "kampanyası") which blew up at header-encode time. uuid4
+            # already gives 128 bits of uniqueness, advertiser scoping
+            # tags it — no need for the name.
             wallet = await privy.create_solana_wallet(
-                idempotency_key=f"campaign-{advertiser.user_id}-{body.name}-{uuid4().hex[:8]}"
+                idempotency_key=f"campaign-{advertiser.user_id}-{uuid4().hex[:8]}"
             )
         except PrivyError as e:
             logger.exception("privy create_solana_wallet failed for advertiser=%s", advertiser.user_id)
