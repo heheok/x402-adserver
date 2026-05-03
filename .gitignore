@@ -35,8 +35,11 @@ dist/
 # claude code (personal config, permissions, local session state)
 .claude/
 
-# personal deploy notes / cheatsheets
+# personal notes — local-only working docs
 DEPLOY-CHEATSHEET.md
+PITCH-DECK.md
+DEMO-SCRIPT.md
+JUDGE-FAQ.md
 
 # docker save artifacts (created during local-build → scp-to-VM redeploy flow)
 *.tar
