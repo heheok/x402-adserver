@@ -7,6 +7,8 @@ import {
   type CampaignRow,
   type SettlementRow,
   type StatsRow,
+  formatDmas,
+  groupByBatch,
   timeAgo,
 } from "../lib/aggregations";
 import { humanizeError } from "../lib/errors";
@@ -697,7 +699,7 @@ export default function CampaignCard({
             }}
           >
             <span>When</span>
-            <span>Nonce</span>
+            <span>Plays</span>
             <span>DMA</span>
             <span>Publisher</span>
             <span style={{ textAlign: "right" }}>Amount</span>
@@ -727,9 +729,10 @@ export default function CampaignCard({
               no settlements yet
             </div>
           )}
-          {stats.data?.recent_settlements.map((s, i) => (
+          {stats.data &&
+            groupByBatch(stats.data.recent_settlements).map((s, i) => (
             <div
-              key={s.id}
+              key={s.tx_hash ?? s.id}
               className="x-stl-row"
               style={{
                 display: "grid",
@@ -750,23 +753,29 @@ export default function CampaignCard({
               </span>
               <span
                 className="x-mono"
-                style={{ color: "var(--tx-1)", fontSize: 11 }}
+                style={{
+                  color: s.play_count > 1 ? "var(--tx-0)" : "var(--tx-2)",
+                  fontSize: 11,
+                  fontWeight: s.play_count > 1 ? 600 : 400,
+                }}
               >
-                {truncateAddress(s.nonce, 4)}
+                {s.play_count > 1 ? `×${s.play_count}` : "—"}
               </span>
               <span
+                title={s.dmas.length > 1 ? s.dmas.join(", ") : undefined}
                 style={{
-                  color: s.dma ? "var(--tx-1)" : "var(--tx-3)",
+                  color: s.dmas.length > 0 ? "var(--tx-1)" : "var(--tx-3)",
                   fontSize: 11,
-                  fontFamily: s.dma
-                    ? "var(--font-sans)"
-                    : "var(--font-mono)",
+                  fontFamily:
+                    s.dmas.length > 0
+                      ? "var(--font-sans)"
+                      : "var(--font-mono)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
                 }}
               >
-                {s.dma ?? "—"}
+                {formatDmas(s.dmas)}
               </span>
               <span
                 className="x-mono"

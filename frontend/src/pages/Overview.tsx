@@ -5,6 +5,8 @@ import { useApi, api } from "../lib/api";
 import {
   byStatus,
   expiringSoon,
+  formatDmas,
+  groupByBatch,
   timeAgo,
   type CampaignRow,
 } from "../lib/aggregations";
@@ -338,9 +340,9 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
             settled.
           </div>
         ) : (
-          activity.map((s, i) => (
+          groupByBatch(activity).map((s, i) => (
             <div
-              key={s.id}
+              key={s.tx_hash ?? s.id}
               className={
                 flashIds.has(s.id) ? "x-act-row x-row-flash" : "x-act-row"
               }
@@ -372,15 +374,20 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
                 {s.campaign_name}
               </span>
               <span
+                title={s.dmas.length > 1 ? s.dmas.join(", ") : undefined}
                 style={{
-                  color: s.dma ? "var(--tx-1)" : "var(--tx-3)",
+                  color: s.dmas.length > 0 ? "var(--tx-1)" : "var(--tx-3)",
                   fontSize: 11,
-                  fontFamily: s.dma
-                    ? "var(--font-sans)"
-                    : "var(--font-mono)",
+                  fontFamily:
+                    s.dmas.length > 0
+                      ? "var(--font-sans)"
+                      : "var(--font-mono)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
                 }}
               >
-                {s.dma ?? "—"}
+                {formatDmas(s.dmas)}
               </span>
               <span
                 className="x-mono x-tnum"
@@ -397,6 +404,17 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
                 {s.status === "confirmed" ? "+" : ""}
                 {formatUsdc(s.amount_usdc)}{" "}
                 <span style={{ color: "var(--tx-2)", fontSize: 10 }}>USDC</span>
+                {s.play_count > 1 && (
+                  <span
+                    style={{
+                      color: "var(--tx-2)",
+                      fontSize: 10,
+                      marginLeft: 6,
+                    }}
+                  >
+                    ×{s.play_count}
+                  </span>
+                )}
               </span>
               <span style={{ textAlign: "right" }}>
                 {s.tx_hash && s.solscan_url ? (
