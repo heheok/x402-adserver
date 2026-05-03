@@ -58,74 +58,12 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 - [Session 16.9 — Money refactor: float → integer microUSDC](worklog/session-16.9.md) ✅
 - [Session 17 — Local prod-shape compose (Caddy + multi-stage SPA build)](worklog/session-17.md) ✅
 - [Rebrand to Solboards (2026-05-03) — domain locked, x402-Ad-Server → Solboards across UI/configs/containers/docs/memory; Privy modal themed](worklog/rebrand-2026-05-03.md) ✅
+- [Session 18 — Deploy to GCE VM (solboards.xyz) — Cloudflare orange-cloud + Origin Cert, nightly SQLite → GCS backup](worklog/session-18.md) ✅
 - [Session 18.7 — Responsive design pass + creative auto-resize + active-campaign shine](worklog/session-18.7.md) ✅
-
-### Session 18 — Deploy to GCE VM (domain: solboards.xyz)
-
-**Topology (decided 2026-04-30, replacing earlier Cloud Run + Cloud SQL plan — see worklog/session-17.md for the why):**
-single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. Three containers — backend (FastAPI on internal docker network), caddy (TLS terminator + static SPA + reverse proxy on 80/443), and the multi-stage `x402-web` image baking the Vite build into Caddy. SQLite stays on the VM's persistent disk; no Postgres migration. ~$13/mo against GCP free-trial credits.
-
-**TLS path (decided 2026-05-03):** Cloudflare orange-cloud (proxied) + **CF Origin Cert** baked into Caddy. CF Universal SSL handles browser TLS at the edge; Caddy serves a 15-year ECDSA Origin Cert that CF validates on the CF→origin hop ("Full (strict)"). No Let's Encrypt anywhere. CF benefits we get: hidden origin IP, edge caching, DDoS shield. Repo prep already shipped (Caddyfile.cloudflare + Dockerfile.prod CADDYFILE build arg + compose mount of `backend/.secrets/cf-origin/`).
-
-- [x] Decide domain — **solboards.xyz** (registered, DNS on Cloudflare). Locked 2026-05-03.
-- [x] Decide Cloudflare proxy mode — **orange-cloud + CF Origin Cert** (Full strict). Locked 2026-05-03.
-- [x] Generate CF Origin Cert (ECC, 15 years, hostnames `solboards.xyz, *.solboards.xyz`) — saved to `backend/.secrets/cf-origin/origin.pem` + `origin.key`, with offsite backup.
-- [ ] In CF dashboard: SSL/TLS → Overview → set encryption mode to **Full (strict)**.
-- [ ] In CF dashboard: Caching → Cache Rules → bypass cache for `URI Path matches "/index.html"` and `URI Path starts with "/api/"`. Static hashed assets (`/assets/*-[hash].js`) keep CF's default cache.
-- [ ] Provision GCE e2-small VM (us-central1, Debian 12), install Docker.
-- [ ] Reserve static external IP. In CF DNS: set A record `solboards.xyz` to that IP, **proxied (orange)**. Add `www` as A or CNAME, also proxied.
-- [ ] Firewall: 80/443 from 0.0.0.0/0 (CF still hits 80/443 on origin), 22 from operator IP (or via IAP-tunneled SSH). Could tighten 80/443 to CF's published IP ranges later, deferred.
-- [ ] Build & push the `x402-web` image to Artifact Registry (or build on the VM). Build with `CADDYFILE=Caddyfile.cloudflare`.
-- [ ] `scp -r backend/.env backend/.secrets/ vm:~/x402/backend/` (includes the CF Origin Cert dir + Privy creds + GCS SA key).
-- [ ] `chmod 600` on `backend/.secrets/cf-origin/origin.key` on the VM.
-- [ ] `CADDYFILE=Caddyfile.cloudflare DOMAIN=solboards.xyz docker compose -f docker-compose.prod.yml up -d --build`
-- [ ] Verify the CF→origin handshake: `curl -kI https://<vm-ip>/` should return 200 with the CF Origin cert; `curl -I https://solboards.xyz/` should return 200 with CF's edge cert (header `cf-ray` present).
-- [ ] **Verify CF Cache Rules took effect** (rules were created pre-deploy 2026-05-03). Hit the live site and check `cf-cache-status` response header — must be `BYPASS` for `/`, `/api/health`, `/api/campaigns`, and any other dynamic paths; `HIT` (or `MISS` then `HIT` on second request) for `/assets/*-[hash].js` and other hashed assets. If `/` or `/api/*` shows `HIT`, the rule didn't deploy correctly — recheck the rule's "URI Path does not start with /assets/" filter and bypass-cache action in CF dashboard before judges hit the site.
-- [ ] Smoke test the full demo loop on `https://solboards.xyz`.
-- [x] **Nightly SQLite backup → GCS bucket** (2026-05-03). Bucket `gs://solboards-db-backups` (us-central1, UBLA), 7-day lifecycle for auto-delete. Host script `~/backup-db.sh` on the VM uses `sqlite3 .backup` (multi-process safe, doesn't block writers) into `/tmp/`, then `gcloud storage cp` to the bucket with date-keyed filename, then cleanup. Cron schedule: daily at 03:00 UTC. Auth: VM's default compute SA `657107916157-compute@developer.gserviceaccount.com` granted `roles/storage.objectAdmin` on the bucket; VM scopes widened to `cloud-platform` (default GCE scope is `devstorage.read_only`, which silently breaks any write workflow). One verify-tomorrow follow-up: confirm a `2026-05-04.db` shows up at 03:00 UTC. Cost: ~$0.007/mo at current DB size.
-- [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo.
-- [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function.
-
-### Session 18.7 — Responsive design pass (3 breakpoints) ✅
-
-Shipped 2026-05-03. Detail: `worklog/session-18.7.md`. Summary below; details, findings, and follow-ups in the worklog.
-
-**Breakpoints:**
-
-| Name    | Range          | Target                        |
-|---------|----------------|-------------------------------|
-| Mobile  | `< 640px`      | iPhone, small Android         |
-| Tablet  | `640–1023px`   | iPad portrait, phones landscape |
-| Desktop | `≥ 1024px`     | Current design (unchanged)    |
-
-**Per-page scope:**
-
-- [x] **Login**: verified at 375px, just works.
-- [x] **AppHeader**: subtitle + devnet badge hidden on mobile via `x-hide-sm`; padding reduced.
-- [x] **Overview**: stat grid 4→2→1, status row wraps to 2x3, activity table drops DMA + Tx columns on mobile (column-hide replaced an earlier horizontal-scroll attempt — see worklog finding).
-- [x] **Campaigns list**: `x-page` wrappers; vertical list, no grid collapse needed.
-- [x] **CampaignCard**: collapsed row restacks (progress drops to row 2, chevron hides); expanded header pushes action group to its own row; stats 6→3→2; targeting/last-play 1fr 1fr → 1-col; settlement table drops Nonce + Publisher on mobile; title + wallet rows get `flex-wrap` so meta items break cleanly between elements (not mid-string).
-- [x] **Campaign wizard**: Modal step labels hidden on mobile (numbered dots stay), StepImage preview restacks chips to a full-width row, StepTargeting 3→2 col, StepSchedule arrow icon hides, StepReview row 160px+1fr stacks, SuccessTx 2-col → 1-col.
-- [x] **Live activity map**: `tokens.css` `.x-map { height: 200px }` at mobile. (Note: PLAN.md previously listed this under "Overview" but the map only lives inside the expanded CampaignCard — there's no Overview-level map in the current design.)
-- [x] Wizard sidebar / breadcrumbs: padding tightens via modal's existing wrap; step dot labels hide.
-
-**Out-of-scope additions shipped in the same pass** (added during the session; both demo-day-critical):
-
-- [x] **Creative auto-resize** (`StepImage.tsx`): client-side canvas normalization to 1920×1080 with scale-fit + black letterbox. Accepts any JPG/PNG up to 15 MB instead of hard-rejecting non-1920×1080 uploads. Re-encodes as JPEG @ 0.92 quality (output ~200-500 KB). Backend's strict 1920×1080 + 5 MB caps stay in place as defense-in-depth and are now always satisfied. UI shows a `✓ resized` chip when normalization happened.
-- [x] **Active-campaign progress shine** (eye-candy): `Progress.shine` prop wires a translucent white sweep across the filled portion of the gradient bar every 3.6s (most of the cycle is held off-screen so it reads as ambient, not busy). Wired on both CampaignCard call sites with `shine={status === "active" && pct > 0}`.
-
-**Sequencing note:** PLAN.md previously said "don't start until faucet rate-limit (Session 19's first item) is shipped." User explicitly overrode that ordering — wanted user-facing demo polish first. Faucet rate-limit still pending and remains the first item in Session 19. Override is risk-free: 18.7 is CSS / className / client-side image normalization only, no backend touch.
-
-**Follow-ups (not blockers, see worklog):**
-
-- Smoke-test on a real iPhone before submission if time permits (devtools simulation isn't pixel-perfect for tap targets / safe areas).
-- WalletChip dropdown panel is hardcoded `width: 320` — would clip at hypothetical 320px viewport (older iPhone SE). Not blocking at our 375px target. Switch to `max-width: calc(100vw - 32px)` if anyone reports it.
-
----
 
 ### Session 19 — Pre-demo polish + submission
 
-- [ ] **Faucet rate-limit / cap per advertiser** (security, must-ship before judges hit the URL). Currently `POST /api/faucet` is unrestricted: any logged-in user can drain the treasury. Treasury refill rate is capped at 20 USDC / 2h by the Circle devnet faucet, so an unbounded faucet is a real DoS surface even with a single bad actor. Plan: new `faucet_claims` table (id, advertiser_id, advertiser_wallet, amount_usdc, tx_hash, status, created_at), per-advertiser running total enforced in the route: **cap at 100 USDC per Privy DID, lifetime** (= 10 calls at 10 USDC each — generous-enough headroom for testing, hard ceiling against drain). Reject with 429 if `SUM(amount_usdc) WHERE advertiser_id=... AND status='confirmed' >= 100_000_000`. SQLAlchemy `create_all` handles schema on next backend boot (SQLite, no migration). If any judge actually needs more during the demo, manual fix is `DELETE FROM faucet_claims WHERE advertiser_id='did:privy:...'` on the VM.
+- [x] **Faucet rate-limit / cap per advertiser** ✅ (2026-05-03). New `faucet_claims` table (id, advertiser_id, advertiser_wallet, amount_usdc, tx_hash, status, created_at). `POST /api/faucet` now sums non-failed claims for the requesting Privy DID and rejects with 429 if `sum + new_amount > 100_000_000` micro (= 100 USDC lifetime). Pending counts toward the cap (closes the spam-click window during broadcast). At the demo's `FAUCET_AMOUNT_USDC=20`, that's 5 shots per advertiser before 429. Auto-creates via `create_all`, no migration. Manual override on the VM if a judge needs more: `DELETE FROM faucet_claims WHERE advertiser_id='did:privy:...';`.
 - [ ] Judge demo script (2-3 min)
 - [ ] Record demo video
 - [ ] Submission README + Devpost writeup
@@ -133,6 +71,8 @@ Shipped 2026-05-03. Detail: `worklog/session-18.7.md`. Summary below; details, f
 ### Buffer (sessions 19+)
 
 - Blockers, polish, stretch items (batch settlement toggle, better fraud checks).
+- **Workload Identity for the GCS creatives bucket** (deferred from Session 18) — replace the JSON SA key in `backend/.secrets/` with Workload Identity Federation. Acceptable for the demo as-is.
+- **Treasury topup cron migration** (deferred from Session 18) — if/when the Circle devnet faucet is upgraded out of the 20 USDC / 2h cap, move the topup cron from local Windows Task Scheduler to Cloud Scheduler + Cloud Function so it survives the operator's laptop being off.
 
 ---
 

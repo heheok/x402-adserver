@@ -117,3 +117,26 @@ class UsedNonce(Base):
 
     nonce: Mapped[str] = mapped_column(String, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class FaucetClaimStatus(str, Enum):
+    # Row inserted before the Privy transfer fires. Counts toward the cap so
+    # spam-clicks can't bypass it during the broadcast window.
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    # Privy refused before broadcast — cap is NOT charged for this attempt.
+    FAILED = "failed"
+
+
+class FaucetClaim(Base):
+    __tablename__ = "faucet_claims"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    advertiser_id: Mapped[str] = mapped_column(String, index=True)
+    advertiser_wallet: Mapped[str] = mapped_column(String)
+    amount_usdc: Mapped[int] = mapped_column(BigInteger)
+    tx_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String, default=FaucetClaimStatus.PENDING.value, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

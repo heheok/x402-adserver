@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     treasury_wallet_id: str = ""
     treasury_wallet_address: str = ""
     faucet_amount_usdc: float = 100.0
+    # Lifetime cap per Privy DID. Drain ceiling — once an advertiser has
+    # claimed this many USDC across all calls (pending + confirmed), /api/faucet
+    # returns 429. Manual override on the VM:
+    #   DELETE FROM faucet_claims WHERE advertiser_id='did:privy:...';
+    faucet_lifetime_cap_usdc: float = 100.0
 
     # Comma-separated lists (matching order) of Privy server wallet ids /
     # addresses used to multiplex Circle's 20-USDC-per-2h-per-address devnet

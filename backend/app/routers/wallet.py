@@ -2,9 +2,13 @@ import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from ..config import Settings, get_settings
+from ..database import get_db
 from ..dependencies import AdvertiserIdentity, require_advertiser
+from ..models import FaucetClaim, FaucetClaimStatus
 from ..schemas import FaucetResponse, WalletInfo
 from ..services.money import micro_str, to_micro
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
@@ -45,6 +49,7 @@ async def faucet(
     advertiser: AdvertiserIdentity = Depends(require_advertiser),
     privy: PrivyClient = Depends(get_privy_client),
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
 ) -> FaucetResponse:
     if not settings.treasury_wallet_id or not settings.treasury_wallet_address:
         raise HTTPException(
@@ -54,6 +59,35 @@ async def faucet(
 
     recipient = await _resolve_advertiser_wallet(advertiser, privy)
     faucet_amount_micro = to_micro(settings.faucet_amount_usdc)
+    cap_micro = to_micro(settings.faucet_lifetime_cap_usdc)
+
+    # Lifetime cap enforcement. Pending counts toward the cap so a user
+    # spamming the button during the broadcast window can't bypass it.
+    # Failed rows do NOT count (Privy refused pre-broadcast — no funds left).
+    spent_micro = db.scalar(
+        select(func.coalesce(func.sum(FaucetClaim.amount_usdc), 0))
+        .where(FaucetClaim.advertiser_id == advertiser.user_id)
+        .where(FaucetClaim.status != FaucetClaimStatus.FAILED.value)
+    ) or 0
+
+    if spent_micro + faucet_amount_micro > cap_micro:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="faucet lifetime cap reached",
+        )
+
+    # Reserve the slot before broadcasting. If we crash between commit and
+    # the Privy call, the row sits at PENDING and counts toward the cap —
+    # safe over-counting. Operator can reconcile via Solscan if needed.
+    claim = FaucetClaim(
+        id=str(uuid4()),
+        advertiser_id=advertiser.user_id,
+        advertiser_wallet=recipient,
+        amount_usdc=faucet_amount_micro,
+        status=FaucetClaimStatus.PENDING.value,
+    )
+    db.add(claim)
+    db.commit()
 
     tx_b64 = await build_usdc_transfer_tx(
         from_address=settings.treasury_wallet_address,
@@ -73,7 +107,13 @@ async def faucet(
             reference_id=f"faucet-{advertiser.user_id}-{uuid4().hex[:8]}",
         )
     except PrivyError as e:
+        claim.status = FaucetClaimStatus.FAILED.value
+        db.commit()
         logger.exception("faucet failed for advertiser=%s recipient=%s", advertiser.user_id, recipient)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+
+    claim.tx_hash = tx_hash
+    claim.status = FaucetClaimStatus.CONFIRMED.value
+    db.commit()
 
     return FaucetResponse(amount=micro_str(faucet_amount_micro), tx_hash=tx_hash)
