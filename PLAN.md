@@ -79,13 +79,15 @@ single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. T
 - [ ] `chmod 600` on `backend/.secrets/cf-origin/origin.key` on the VM.
 - [ ] `CADDYFILE=Caddyfile.cloudflare DOMAIN=solboards.xyz docker compose -f docker-compose.prod.yml up -d --build`
 - [ ] Verify the CF→origin handshake: `curl -kI https://<vm-ip>/` should return 200 with the CF Origin cert; `curl -I https://solboards.xyz/` should return 200 with CF's edge cert (header `cf-ray` present).
+- [ ] **Verify CF Cache Rules took effect** (rules were created pre-deploy 2026-05-03). Hit the live site and check `cf-cache-status` response header — must be `BYPASS` for `/`, `/api/health`, `/api/campaigns`, and any other dynamic paths; `HIT` (or `MISS` then `HIT` on second request) for `/assets/*-[hash].js` and other hashed assets. If `/` or `/api/*` shows `HIT`, the rule didn't deploy correctly — recheck the rule's "URI Path does not start with /assets/" filter and bypass-cache action in CF dashboard before judges hit the site.
 - [ ] Smoke test the full demo loop on `https://solboards.xyz`.
 - [ ] **Nightly SQLite backup → GCS bucket.** Cron on the VM (or a Cloud Scheduler hitting a tiny Cloud Function): `docker compose exec -T backend sqlite3 /app/data/adserver.db ".backup /app/data/snap.db"` then `gsutil cp /app/data/snap.db gs://x402-db-backups/$(date +%F).db`. Use `.backup` (handles concurrent writes), not raw file copy. ~7 day retention via lifecycle rule on the bucket. ~$0/mo at this DB size. Cheap insurance against disk failure, accidental `rm`, or a botched migration during demo prep.
 - [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo.
 - [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function.
 
-### Session 19 — Demo rehearsal + submission
+### Session 19 — Pre-demo polish + submission
 
+- [ ] **Faucet rate-limit / cap per advertiser** (security, must-ship before judges hit the URL). Currently `POST /api/faucet` is unrestricted: any logged-in user can drain the treasury. Treasury refill rate is capped at 20 USDC / 2h by the Circle devnet faucet, so an unbounded faucet is a real DoS surface even with a single bad actor. Plan: new `faucet_claims` table (id, advertiser_id, advertiser_wallet, amount_usdc, tx_hash, status, created_at), per-advertiser running total enforced in the route: **cap at 100 USDC per Privy DID, lifetime** (= 10 calls at 10 USDC each — generous-enough headroom for testing, hard ceiling against drain). Reject with 429 if `SUM(amount_usdc) WHERE advertiser_id=... AND status='confirmed' >= 100_000_000`. SQLAlchemy `create_all` handles schema on next backend boot (SQLite, no migration). If any judge actually needs more during the demo, manual fix is `DELETE FROM faucet_claims WHERE advertiser_id='did:privy:...'` on the VM.
 - [ ] Judge demo script (2-3 min)
 - [ ] Record demo video
 - [ ] Submission README + Devpost writeup
