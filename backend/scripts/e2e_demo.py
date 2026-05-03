@@ -1055,7 +1055,7 @@ async def step_multi_campaign_batch_isolation(
 
 
 async def main() -> int:
-    print("=== x402 Ad Server — E2E demo (in-process ASGI against app.main:app) ===")
+    print("=== Solboards — E2E demo (in-process ASGI against app.main:app) ===")
     try:
         treasury_wallet_id, treasury_address = await step_preflight()
     except Exception as e:  # noqa: BLE001

@@ -1,5 +1,5 @@
 import WalletChip from "./WalletChip";
-import X402Mark from "./ui/X402Mark";
+import BrandMark from "./ui/BrandMark";
 
 export default function AppHeader() {
   return (
@@ -16,7 +16,7 @@ export default function AppHeader() {
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <X402Mark size={22} />
+        <BrandMark size={22} />
         <div
           style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}
         >
@@ -24,7 +24,7 @@ export default function AppHeader() {
             className="x-display"
             style={{ fontSize: 18, letterSpacing: "-0.02em" }}
           >
-            x402
+            solboards
           </span>
           <span
             style={{
@@ -36,7 +36,7 @@ export default function AppHeader() {
               fontFamily: "var(--font-mono)",
             }}
           >
-            DOOH ad protocol
+            DOOH ad network
           </span>
         </div>
         <span

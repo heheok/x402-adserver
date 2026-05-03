@@ -1,4 +1,4 @@
-# x402 Ad Server — Build Plan
+# Solboards — Build Plan
 
 Living document. Updated at the end of every working session.
 
@@ -10,7 +10,7 @@ Living document. Updated at the end of every working session.
 > 4. Confirm the user has `backend/.env` populated. The treasury vars (`TREASURY_WALLET_ID`, `TREASURY_WALLET_ADDRESS`) come from `scripts/bootstrap_treasury.py`. If they don't exist, bootstrap + fund per RUNBOOK.
 > 5. Start containers: `docker compose up -d backend`. Smoke: `curl localhost:8000/health`.
 > 6. The SQLite DB may be empty — that's expected. Seed with `scripts/seed_test_campaign.py` (future) or the one-liner in the relevant worklog file if you need a live campaign for testing.
-> 7. Architectural decisions are fixed (see **Protocol notes** below and `memory/project_x402_adserver.md`). Don't re-litigate.
+> 7. Architectural decisions are fixed (see **Protocol notes** below). Don't re-litigate.
 > 8. Update this file (and the matching `worklog/session-NN.md`) plus `RUNBOOK.md` at the end of every session.
 
 **North star:** end-to-end demo loop on Solana devnet —
@@ -57,20 +57,22 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 - [Session 16.8 — Batch settlements](worklog/session-16.8.md) ✅
 - [Session 16.9 — Money refactor: float → integer microUSDC](worklog/session-16.9.md) ✅
 - [Session 17 — Local prod-shape compose (Caddy + multi-stage SPA build)](worklog/session-17.md) ✅
+- [Rebrand to Solboards (2026-05-03) — domain locked, x402-Ad-Server → Solboards across UI/configs/containers/docs/memory; Privy modal themed](worklog/rebrand-2026-05-03.md) ✅
 
-### Session 18 — Deploy to GCE VM (gated on domain)
+### Session 18 — Deploy to GCE VM (domain: solboards.xyz)
 
 **Topology (decided 2026-04-30, replacing earlier Cloud Run + Cloud SQL plan — see worklog/session-17.md for the why):**
 single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. Three containers — backend (FastAPI on internal docker network), caddy (TLS via Let's Encrypt + static SPA + reverse proxy on 80/443), and the multi-stage `x402-web` image baking the Vite build into Caddy. SQLite stays on the VM's persistent disk; no Postgres migration. ~$13/mo against GCP free-trial credits.
 
-- [ ] Decide domain (only blocker on the rest of this session)
+- [x] Decide domain — **solboards.xyz** (registered, DNS on Cloudflare). Locked 2026-05-03.
+- [ ] Decide Cloudflare proxy mode — gray-cloud (DNS-only, Caddy does HTTP-01 directly) is simplest and matches the local prod compose; orange-cloud requires switching Caddy to the `caddy-dns/cloudflare` build + a CF API token for DNS-01. Current vote: gray-cloud for the hackathon.
 - [ ] Provision GCE e2-small VM (us-central1, Debian 12), install Docker
-- [ ] Reserve static external IP, point DNS A record at it
+- [ ] Reserve static external IP, point Cloudflare A record `solboards.xyz` (and `www`) at it
 - [ ] Firewall: 80/443 from 0.0.0.0/0, 22 from operator IP (or via IAP-tunneled SSH)
 - [ ] Push `x402-web` image to Artifact Registry (or build on the VM)
 - [ ] `scp` `backend/.env` + `backend/.secrets/` to the VM (Secret Manager deferred — fine for hackathon devnet)
-- [ ] `DOMAIN=your-domain.com docker compose -f docker-compose.prod.yml up -d --build`
-- [ ] Verify Let's Encrypt cert provisions on first boot (port 80 reachable for HTTP-01)
+- [ ] `DOMAIN=solboards.xyz docker compose -f docker-compose.prod.yml up -d --build`
+- [ ] Verify Let's Encrypt cert provisions on first boot (port 80 reachable for HTTP-01; gray-cloud required if proxy mode wasn't already set)
 - [ ] Smoke test the full demo loop on the live URL
 - [ ] **Nightly SQLite backup → GCS bucket.** Cron on the VM (or a Cloud Scheduler hitting a tiny Cloud Function): `docker compose exec -T backend sqlite3 /app/data/adserver.db ".backup /app/data/snap.db"` then `gsutil cp /app/data/snap.db gs://x402-db-backups/$(date +%F).db`. Use `.backup` (handles concurrent writes), not raw file copy. ~7 day retention via lifecycle rule on the bucket. ~$0/mo at this DB size. Cheap insurance against disk failure, accidental `rm`, or a botched migration during demo prep.
 - [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo

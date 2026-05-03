@@ -1,4 +1,4 @@
-# Design brief — x402 Ad Server dashboard
+# Design brief — Solboards dashboard
 
 Paste this into Claude (or your design tool) to generate visual mockups for
 the dashboard facelift. The current frontend is functional but utilitarian;
@@ -10,7 +10,7 @@ implement them in React + CSS.
 
 ## Project context
 
-**x402 Ad Server** — DOOH ad platform on Solana devnet. Advertisers fund
+**Solboards** — DOOH ad platform on Solana devnet. Advertisers fund
 campaigns in USDC via Coinbase's x402 payment protocol; publishers (digital
 out-of-home screen networks) get paid per-play via on-chain settlements.
 

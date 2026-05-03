@@ -151,7 +151,7 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
           <div
             style={{ fontSize: 13, color: "var(--tx-2)", marginTop: 4 }}
           >
-            Real-time campaign performance across the x402 network.
+            Real-time campaign performance across the Solboards network.
           </div>
         </div>
         {autoPlay.data?.enabled && (
@@ -470,7 +470,7 @@ function Empty({ onNewCampaign }: { onNewCampaign: () => void }) {
         Overview
       </div>
       <div style={{ fontSize: 13, color: "var(--tx-2)", marginTop: 4 }}>
-        Real-time campaign performance across the x402 network.
+        Real-time campaign performance across the Solboards network.
       </div>
 
       <div

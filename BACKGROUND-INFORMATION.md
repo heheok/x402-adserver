@@ -1,4 +1,4 @@
-# x402 Ad Server — Project Spec
+# Solboards — Project Spec
 
 ## What We're Building
 

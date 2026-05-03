@@ -1,6 +1,6 @@
 type Props = { size?: number };
 
-export default function X402Mark({ size = 22 }: Props) {
+export default function BrandMark({ size = 22 }: Props) {
   return (
     <svg
       width={size}
@@ -11,7 +11,7 @@ export default function X402Mark({ size = 22 }: Props) {
     >
       <defs>
         <linearGradient
-          id="x402-grad"
+          id="brand-grad"
           x1="0"
           y1="0"
           x2="24"
@@ -28,16 +28,16 @@ export default function X402Mark({ size = 22 }: Props) {
         width="21"
         height="21"
         rx="6.5"
-        stroke="url(#x402-grad)"
+        stroke="url(#brand-grad)"
         strokeWidth="1.5"
       />
       <path
         d="M7.5 7.5 L16.5 16.5 M16.5 7.5 L7.5 16.5"
-        stroke="url(#x402-grad)"
+        stroke="url(#brand-grad)"
         strokeWidth="1.6"
         strokeLinecap="round"
       />
-      <circle cx="12" cy="12" r="2" fill="url(#x402-grad)" />
+      <circle cx="12" cy="12" r="2" fill="url(#brand-grad)" />
     </svg>
   );
 }

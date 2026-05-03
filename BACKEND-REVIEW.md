@@ -173,7 +173,7 @@ the same environment check so misconfigured envs don't accidentally enable.
 - **Where:** `backend/app/services/tokens.py:35`.
 - **Symptom:** if `JWT_SERVER_SECRET` ever leaks into another HS256 system
   (e.g. a dev's other project), tokens cross-validate.
-- **Fix:** add `iss="x402-adserver"`, verify on decode. Same change to
+- **Fix:** add `iss="solboards"`, verify on decode. Same change to
   `dependencies._verify_privy_jwt` already enforces `iss="privy.io"` —
   good model to copy.
 

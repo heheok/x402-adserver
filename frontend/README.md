@@ -1,4 +1,4 @@
-# frontend — x402 Ad Server dashboard
+# frontend — Solboards dashboard
 
 Vite + React + TypeScript. Privy for auth + embedded wallet. React Query for
 server state. Zustand for the small `walletTrack` store that drives post-tx

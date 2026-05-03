@@ -12,7 +12,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: x402-adserver-backend
+    container_name: solboards-backend
     expose:
       - "8000"
     env_file:
@@ -33,7 +33,7 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile.prod
-    container_name: x402-adserver-caddy
+    container_name: solboards-caddy
     ports:
       - "80:80"
       - "443:443"

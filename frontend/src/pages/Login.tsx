@@ -1,7 +1,7 @@
 import { usePrivy } from "@privy-io/react-auth";
 
 import Icon from "../components/ui/Icon";
-import X402Mark from "../components/ui/X402Mark";
+import BrandMark from "../components/ui/BrandMark";
 
 export default function Login() {
   const { login } = usePrivy();
@@ -44,10 +44,10 @@ export default function Login() {
             marginBottom: 18,
           }}
         >
-          <X402Mark size={28} />
+          <BrandMark size={28} />
           <div>
             <div className="x-display" style={{ fontSize: 18 }}>
-              x402 Advertiser Dashboard
+              Solboards — Advertiser Dashboard
             </div>
             <div
               style={{
@@ -92,7 +92,7 @@ export default function Login() {
             textAlign: "center",
           }}
         >
-          demo · third-party advertiser view on x402 ad server
+          demo · third-party advertiser view on solboards
         </div>
       </div>
     </main>

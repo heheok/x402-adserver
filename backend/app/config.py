@@ -10,7 +10,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "x402 Ad Server"
+    app_name: str = "Solboards"
     environment: str = "dev"
 
     database_url: str = "sqlite:///./data/adserver.db"

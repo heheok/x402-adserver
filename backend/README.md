@@ -1,4 +1,4 @@
-# x402 Ad Server — Backend
+# Solboards — Backend
 
 FastAPI + SQLite. Full demo loop: campaign create → x402 fund → bid →
 proof-of-play → settle → refund. See `../PLAN.md` for the session-by-session
