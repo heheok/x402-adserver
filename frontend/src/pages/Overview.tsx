@@ -6,7 +6,6 @@ import {
   byStatus,
   expiringSoon,
   formatDmas,
-  groupByBatch,
   timeAgo,
   type CampaignRow,
 } from "../lib/aggregations";
@@ -20,18 +19,21 @@ import StatusBadge from "../components/ui/StatusBadge";
 
 type AutoPlayStatus = { enabled: boolean; interval_seconds: number };
 
+// One row per batch — backend services/batches.py groups raw settlements
+// by tx_hash (or by (campaign, publisher) while still queued). Fields
+// match SettlementRow plus campaign_id + campaign_name.
 type ActivityRow = {
   id: string;
-  nonce: string;
   campaign_id: string;
   campaign_name: string;
   publisher_wallet: string;
-  amount_usdc: string; // microUSDC string
+  amount_usdc: string;
   tx_hash: string | null;
   solscan_url: string | null;
   status: string;
   created_at: string;
-  dma: string | null;
+  play_count: number;
+  dmas: string[];
 };
 
 type DashboardSummary = {
@@ -340,7 +342,7 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
             settled.
           </div>
         ) : (
-          groupByBatch(activity).map((s, i) => (
+          activity.map((s, i) => (
             <div
               key={s.tx_hash ?? s.id}
               className={

@@ -9,12 +9,14 @@ from ..database import get_db
 from ..dependencies import AdvertiserIdentity, require_advertiser
 from ..models import Campaign, Settlement, SettlementStatus
 from ..schemas import DashboardActivityRow, DashboardSummary
-from ..services.money import micro_str
+from ..services.batches import (
+    RECENT_BATCHES_LIMIT,
+    RECENT_SETTLEMENTS_FETCH,
+    group_settlements_into_batches,
+)
 from ..services.venues import get_venues_index
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
-
-RECENT_ACTIVITY_LIMIT = 10
 
 
 def _solscan_tx_url(tx_hash: str | None) -> str | None:
@@ -61,39 +63,32 @@ def dashboard_summary(
     last_24h_plays = base_q.filter(Settlement.created_at >= cutoff_24h).count()
 
     # Cross-campaign recent activity feed. Pulls all statuses (the UI styles
-    # 'failed' rows differently) but ordered by recency, capped at 10.
+    # 'failed' rows differently) but ordered by recency. Overfetches enough
+    # raw settlement rows to produce RECENT_BATCHES_LIMIT batches after the
+    # tx_hash grouping in services.batches.
     recent_rows = (
         db.query(Settlement, Campaign.name)
         .join(Campaign, Settlement.campaign_id == Campaign.id)
         .filter(Campaign.advertiser_id == advertiser.user_id)
         .order_by(Settlement.created_at.desc())
-        .limit(RECENT_ACTIVITY_LIMIT)
+        .limit(RECENT_SETTLEMENTS_FETCH)
         .all()
     )
 
     venues = get_venues_index()
+    raw_settlements = [s for s, _ in recent_rows]
+    name_by_campaign = {s.campaign_id: name for s, name in recent_rows}
+    grouped = group_settlements_into_batches(
+        raw_settlements, venues, include_campaign_id=True
+    )
     activity: list[DashboardActivityRow] = []
-    for s, campaign_name in recent_rows:
-        # Same UTC stamping as in routers.campaigns._to_settlement_summary —
-        # SQLite drops tzinfo on read, naive ISO on the wire is interpreted as
-        # local by the browser. Stamp UTC before isoformat.
-        created = s.created_at
-        if created is not None and created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        dma = venues.label_for_device(s.device_id) if s.device_id else None
+    for g in grouped[:RECENT_BATCHES_LIMIT]:
+        cid = g.get("campaign_id") or ""
         activity.append(
             DashboardActivityRow(
-                id=s.id,
-                nonce=s.nonce,
-                campaign_id=s.campaign_id,
-                campaign_name=campaign_name,
-                publisher_wallet=s.publisher_wallet,
-                amount_usdc=micro_str(int(s.amount_usdc)),
-                tx_hash=s.tx_hash,
-                solscan_url=_solscan_tx_url(s.tx_hash),
-                status=s.status,
-                created_at=created.isoformat() if created else "",
-                dma=dma,
+                **g,
+                campaign_name=name_by_campaign.get(cid, ""),
+                solscan_url=_solscan_tx_url(g["tx_hash"]),
             )
         )
 

@@ -2,7 +2,6 @@
 // (e.g. "422000" = $0.422). 1 USDC = 1_000_000 microUSDC. See lib/money.ts
 // for parse/format/sum helpers — never do raw arithmetic on these strings
 // (use BigInt or sumMicro/subMicro).
-import { sumMicro } from "./money";
 
 export type CampaignRow = {
   id: string;
@@ -20,16 +19,21 @@ export type CampaignRow = {
   protocol_fee_solscan_url?: string | null;
 };
 
+// One row per batch — the backend (services/batches.py) collapses raw
+// Settlement rows by tx_hash for confirmed plays and by (campaign,
+// publisher) for queued ones, so the dashboard shows one row per batch
+// across the whole pending → confirmed lifecycle. See backend
+// app/schemas.py:SettlementSummary for the full lifecycle notes.
 export type SettlementRow = {
-  id: string;
-  nonce: string;
+  id: string; // tx_hash if confirmed, else `pending:{cid}:{pubw}`
   publisher_wallet: string;
-  amount_usdc: string; // microUSDC string
+  amount_usdc: string; // microUSDC string (sum across plays in the batch)
   tx_hash: string | null;
   solscan_url: string | null;
   status: string;
-  created_at: string;
-  dma?: string | null;
+  created_at: string; // latest play in the batch
+  play_count: number;
+  dmas: string[];
 };
 
 export type StatsRow = {
@@ -73,55 +77,6 @@ export function expiringSoon(rows: CampaignRow[], withinDays = 3): number {
     if (end >= today.getTime() && end <= cutoffMs) n++;
   }
   return n;
-}
-
-/**
- * Collapse consecutive plays that share a `tx_hash` into one row, since the
- * batch settler emits a single Solana tx per (campaign, publisher) group.
- * Showing N rows that all link to the same Solscan tx looks like duplicate
- * settlements; collapsing keeps the activity feed honest.
- *
- * Pending / flushing / failed rows have `tx_hash === null` and stay
- * ungrouped (one row per play). Amounts inside a batch are summed via
- * BigInt-safe `sumMicro`. Distinct DMAs across the batch are collected in
- * `dmas` (a publisher network usually runs screens in multiple markets, so
- * a batch can mix DMAs even though it's one tx, one publisher). Order is
- * preserved — the first occurrence of each tx_hash determines its position.
- *
- * Output type is `T & { play_count, dmas }` — callers retain every original
- * field; the only fields meaningfully aggregated are `amount_usdc` (summed)
- * and `dmas` (deduped). Other shared-by-construction fields like
- * `campaign_name` and `publisher_wallet` collapse to the first row's value.
- */
-export function groupByBatch<
-  T extends {
-    tx_hash: string | null;
-    amount_usdc: string;
-    dma?: string | null;
-  },
->(rows: T[]): Array<T & { play_count: number; dmas: string[] }> {
-  const byTx = new Map<string, T & { play_count: number; dmas: string[] }>();
-  const out: Array<T & { play_count: number; dmas: string[] }> = [];
-  for (const r of rows) {
-    const initialDmas = r.dma ? [r.dma] : [];
-    if (!r.tx_hash) {
-      out.push({ ...r, play_count: 1, dmas: initialDmas });
-      continue;
-    }
-    const existing = byTx.get(r.tx_hash);
-    if (!existing) {
-      const batch = { ...r, play_count: 1, dmas: initialDmas };
-      byTx.set(r.tx_hash, batch);
-      out.push(batch);
-    } else {
-      existing.amount_usdc = sumMicro([existing.amount_usdc, r.amount_usdc]);
-      existing.play_count++;
-      if (r.dma && !existing.dmas.includes(r.dma)) {
-        existing.dmas.push(r.dma);
-      }
-    }
-  }
-  return out;
 }
 
 /** Render a batch's DMA set compactly: "NY", "NY · LA", "NY +2". */

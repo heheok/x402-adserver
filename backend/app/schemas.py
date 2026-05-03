@@ -89,19 +89,36 @@ class CampaignSummary(BaseModel):
 
 
 class SettlementSummary(BaseModel):
+    """One row per batch — the batch settler emits a single Solana tx per
+    (campaign, publisher) group, so plays sharing a tx_hash are aggregated
+    server-side before reaching the dashboard. Pending plays awaiting the
+    next flush are aggregated by (campaign, publisher) too, so the table
+    shows a single "queued" row that flips into a confirmed batch when the
+    flush lands.
+
+    Field map across the pending → confirmed lifecycle:
+      - tx_hash / solscan_url: null while queued, set once the batch confirms.
+      - status: 'pending' (covers PENDING + FLUSHING) → 'confirmed'.
+      - amount_usdc: sum of all plays in the batch (microUSDC).
+      - play_count: number of /proof rows that landed in this batch.
+      - dmas: distinct DMAs the plays came from (publisher networks usually
+        run screens in multiple markets, so a single tx commonly mixes them).
+      - id: stable React key. tx_hash if set, else `pending:{cid}:{pubw}`.
+        Flips at confirm time — the UI accepts the brief flash as a signal
+        that the batch landed on chain.
+    """
+
     id: str
-    nonce: str
     publisher_wallet: str
-    amount_usdc: MicroStr  # microUSDC string (field name kept for API stability)
+    amount_usdc: MicroStr  # microUSDC string (sum across plays in the batch)
     tx_hash: str | None
     solscan_url: str | None
     status: str
-    created_at: str
-    # DMA the bid was issued for (resolved server-side from device_id via the
-    # venues index). None for legacy rows that predate the device_id column,
-    # or rows whose device is no longer in the inventory file. Venue name
-    # stays internal (publisher-private — see Session 14 findings).
-    dma: str | None = None
+    created_at: str  # latest play in the batch
+    play_count: int
+    # DMAs the bid was issued for (resolved server-side from device_id via the
+    # venues index). Empty list = no DMA-resolved plays in this batch.
+    dmas: list[str] = []
 
 
 class CampaignStats(BaseModel):
@@ -139,19 +156,21 @@ class RefundResponse(BaseModel):
 
 
 class DashboardActivityRow(BaseModel):
-    """A settlement row joined with its campaign name, for the Overview feed."""
+    """A batch row joined with its campaign name, for the Overview feed.
+    Same shape as SettlementSummary plus campaign_id + campaign_name. See
+    SettlementSummary docstring for the pending-vs-confirmed lifecycle."""
 
     id: str
-    nonce: str
     campaign_id: str
     campaign_name: str
     publisher_wallet: str
-    amount_usdc: MicroStr  # microUSDC string
+    amount_usdc: MicroStr  # microUSDC string (sum across plays in the batch)
     tx_hash: str | None
     solscan_url: str | None
     status: str
     created_at: str
-    dma: str | None = None
+    play_count: int
+    dmas: list[str] = []
 
 
 class DashboardSummary(BaseModel):

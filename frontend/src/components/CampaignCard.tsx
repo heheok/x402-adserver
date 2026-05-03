@@ -8,7 +8,6 @@ import {
   type SettlementRow,
   type StatsRow,
   formatDmas,
-  groupByBatch,
   timeAgo,
 } from "../lib/aggregations";
 import { humanizeError } from "../lib/errors";
@@ -578,8 +577,7 @@ export default function CampaignCard({
                       background:
                         lastPlay.status === "confirmed"
                           ? "var(--sol-teal)"
-                          : lastPlay.status === "pending" ||
-                              lastPlay.status === "flushing"
+                          : lastPlay.status === "pending"
                             ? "var(--tx-2)"
                             : "var(--st-expired)",
                       boxShadow:
@@ -596,7 +594,9 @@ export default function CampaignCard({
                         fontWeight: 500,
                       }}
                     >
-                      {lastPlay.dma ?? "Unknown DMA"}
+                      {lastPlay.dmas.length > 0
+                        ? formatDmas(lastPlay.dmas)
+                        : "Unknown DMA"}
                     </div>
                     <div
                       style={{
@@ -609,8 +609,7 @@ export default function CampaignCard({
                       {truncateAddress(lastPlay.publisher_wallet, 4)} ·{" "}
                       {lastPlay.status === "confirmed"
                         ? "settled on-chain"
-                        : lastPlay.status === "pending" ||
-                            lastPlay.status === "flushing"
+                        : lastPlay.status === "pending"
                           ? "queued"
                           : "settlement failed"}
                     </div>
@@ -729,8 +728,7 @@ export default function CampaignCard({
               no settlements yet
             </div>
           )}
-          {stats.data &&
-            groupByBatch(stats.data.recent_settlements).map((s, i) => (
+          {stats.data?.recent_settlements.map((s, i) => (
             <div
               key={s.tx_hash ?? s.id}
               className="x-stl-row"

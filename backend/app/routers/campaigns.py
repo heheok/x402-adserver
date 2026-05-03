@@ -25,6 +25,11 @@ from ..schemas import (
     SimulatePlayResponse,
 )
 from ..services import x402 as x402_service
+from ..services.batches import (
+    RECENT_BATCHES_LIMIT,
+    RECENT_SETTLEMENTS_FETCH,
+    group_settlements_into_batches,
+)
 from ..services.calc import CalcError, compute_quote, required_sol_seed_lamports
 from ..services.money import micro_str
 from ..services.privy import PrivyClient, PrivyError, get_privy_client
@@ -43,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
-RECENT_SETTLEMENTS_LIMIT = 10
 
 
 def _solscan_tx_url(tx_hash: str | None) -> str | None:
@@ -76,28 +80,15 @@ def _to_summary(c: Campaign) -> CampaignSummary:
     )
 
 
-def _to_settlement_summary(s: Settlement) -> SettlementSummary:
-    # SQLite drops tzinfo on read even when the column is DateTime(timezone=True),
-    # so the value comes back naive. We always write UTC (_utcnow), so attach
-    # UTC before isoformat — otherwise the browser parses the wire string as
-    # local time and rows look "3h ago" the moment they're created.
-    created = s.created_at
-    if created is not None and created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    dma = (
-        get_venues_index().label_for_device(s.device_id) if s.device_id else None
-    )
-    return SettlementSummary(
-        id=s.id,
-        nonce=s.nonce,
-        publisher_wallet=s.publisher_wallet,
-        amount_usdc=micro_str(int(s.amount_usdc)),
-        tx_hash=s.tx_hash,
-        solscan_url=_solscan_tx_url(s.tx_hash),
-        status=s.status,
-        created_at=created.isoformat() if created else "",
-        dma=dma,
-    )
+def _to_settlement_summaries(rows: list[Settlement]) -> list[SettlementSummary]:
+    """Group raw Settlement rows into batches and stamp solscan_url. See
+    services.batches for the grouping rules."""
+    venues = get_venues_index()
+    grouped = group_settlements_into_batches(rows, venues)
+    return [
+        SettlementSummary(**g, solscan_url=_solscan_tx_url(g["tx_hash"]))
+        for g in grouped[:RECENT_BATCHES_LIMIT]
+    ]
 
 
 def _owned_campaign(
@@ -493,7 +484,7 @@ def campaign_stats(
         db.query(Settlement)
         .filter(Settlement.campaign_id == c.id)
         .order_by(Settlement.created_at.desc())
-        .limit(RECENT_SETTLEMENTS_LIMIT)
+        .limit(RECENT_SETTLEMENTS_FETCH)
         .all()
     )
     cutoff_24h = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
@@ -554,7 +545,7 @@ def campaign_stats(
         protocol_fee_tx_hash=c.protocol_fee_tx_hash,
         protocol_fee_solscan_url=_solscan_tx_url(c.protocol_fee_tx_hash),
         plays_by_dma=plays_by_dma,
-        recent_settlements=[_to_settlement_summary(s) for s in recent],
+        recent_settlements=_to_settlement_summaries(recent),
     )
 
 
@@ -564,6 +555,9 @@ def campaign_settlements(
     advertiser: AdvertiserIdentity = Depends(require_advertiser),
     db: Session = Depends(get_db),
 ) -> list[SettlementSummary]:
+    """Full batched-settlement history for one campaign. Same shape as
+    /stats.recent_settlements but unbounded (no last-N limit). Currently
+    no frontend caller; useful for ad-hoc tooling and reconciliation."""
     c = _owned_campaign(db, campaign_id, advertiser)
     rows = (
         db.query(Settlement)
@@ -571,7 +565,12 @@ def campaign_settlements(
         .order_by(Settlement.created_at.desc())
         .all()
     )
-    return [_to_settlement_summary(s) for s in rows]
+    venues = get_venues_index()
+    grouped = group_settlements_into_batches(rows, venues)
+    return [
+        SettlementSummary(**g, solscan_url=_solscan_tx_url(g["tx_hash"]))
+        for g in grouped
+    ]
 
 
 # ---------------------------------------------------------------------------
