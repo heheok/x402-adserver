@@ -165,7 +165,7 @@ export default function CampaignCard({
   if (!expanded) {
     return (
       <div
-        className="x-card"
+        className="x-card x-camp-collapsed"
         onClick={onToggle}
         role="button"
         tabIndex={0}
@@ -246,6 +246,7 @@ export default function CampaignCard({
                 ? "var(--tint-grad-strong)"
                 : "var(--tx-3)"
             }
+            shine={campaign.status === "active" && pct > 0}
           />
         </div>
         <Icon name="chevron" size={14} />
@@ -271,6 +272,7 @@ export default function CampaignCard({
       />
       <div style={{ position: "relative" }}>
         <div
+          className="x-camp-expanded-head"
           style={{
             display: "grid",
             gridTemplateColumns: "64px 1fr auto",
@@ -280,7 +282,14 @@ export default function CampaignCard({
         >
           <CreativeThumb seed={campaign.id} size={64} label={campaign.name} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
               <span className="x-display" style={{ fontSize: 18 }}>
                 {campaign.name}
               </span>
@@ -291,6 +300,7 @@ export default function CampaignCard({
                     fontSize: 11,
                     color: "var(--tx-2)",
                     fontFamily: "var(--font-mono)",
+                    whiteSpace: "nowrap",
                   }}
                 >
                   · {days} day{days === 1 ? "" : "s"}
@@ -302,13 +312,14 @@ export default function CampaignCard({
                 display: "flex",
                 alignItems: "center",
                 gap: 12,
+                flexWrap: "wrap",
                 fontSize: 11,
                 color: "var(--tx-2)",
                 marginTop: 6,
                 fontFamily: "var(--font-mono)",
               }}
             >
-              <span>
+              <span style={{ whiteSpace: "nowrap" }}>
                 Wallet {truncateAddress(campaign.wallet_address, 4)}
               </span>
               <Solscan href={solscanAccountUrl(campaign.wallet_address)}>
@@ -389,6 +400,7 @@ export default function CampaignCard({
 
         {/* Stats grid */}
         <div
+          className="x-grid-md-3 x-grid-sm-2"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(6, 1fr)",
@@ -502,13 +514,17 @@ export default function CampaignCard({
               {formatUsdc(campaign.spent)} / {formatUsdc(campaign.budget)} USDC
             </span>
           </div>
-          <Progress value={pct} />
+          <Progress
+            value={pct}
+            shine={campaign.status === "active" && pct > 0}
+          />
         </div>
 
         <hr className="x-hr" style={{ margin: "18px 0" }} />
 
         {/* Targeting + last play */}
         <div
+          className="x-grid-sm-1"
           style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr",
@@ -706,6 +722,7 @@ export default function CampaignCard({
             </span>
           </div>
           <div
+            className="x-stl-row"
             style={{
               display: "grid",
               gridTemplateColumns: "70px 90px 1fr 130px 110px 80px",
@@ -752,6 +769,7 @@ export default function CampaignCard({
           {stats.data?.recent_settlements.map((s, i) => (
             <div
               key={s.id}
+              className="x-stl-row"
               style={{
                 display: "grid",
                 gridTemplateColumns: "70px 90px 1fr 130px 110px 80px",

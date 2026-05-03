@@ -7,10 +7,16 @@ import Icon from "../ui/Icon";
 import Progress from "../ui/Progress";
 import { Footer, Lbl } from "./Modal";
 
-const REQUIRED_W = 1920;
-const REQUIRED_H = 1080;
-const MAX_BYTES = 5 * 1024 * 1024;
+const TARGET_W = 1920;
+const TARGET_H = 1080;
+const TARGET_RATIO = TARGET_W / TARGET_H;
+// Pre-normalize cap. We re-encode client-side to a 1920×1080 JPEG before
+// upload, so the file the server actually receives is small (~150–400 KB).
+// 15 MB lets typical phone photos through; anything larger is almost always
+// a panorama / RAW dump that we don't want to decode in a browser canvas.
+const MAX_INPUT_BYTES = 15 * 1024 * 1024;
 const ALLOWED_TYPES = new Set(["image/jpeg", "image/png"]);
+const NORMALIZE_QUALITY = 0.92;
 
 type CreativeUploadResponse = {
   creative_id: string;
@@ -55,6 +61,73 @@ function readImage(
   });
 }
 
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("could not decode image"));
+    img.src = src;
+  });
+}
+
+// Scale-fit any input onto a 1920×1080 black canvas. Letterbox / pillarbox
+// preserves the original creative; we pick black because publisher screens
+// in our (devnet) inventory are dark-background DOOH boards. Output is JPEG
+// because the canvas is opaque after letterboxing — PNG transparency would
+// be wasted bytes.
+async function normalizeTo1920x1080(
+  file: File,
+  origDataUrl: string,
+  origW: number,
+  origH: number,
+): Promise<{ file: File; dataUrl: string; resized: boolean }> {
+  if (origW === TARGET_W && origH === TARGET_H) {
+    return { file, dataUrl: origDataUrl, resized: false };
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = TARGET_W;
+  canvas.height = TARGET_H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas not supported in this browser");
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, TARGET_W, TARGET_H);
+
+  const srcRatio = origW / origH;
+  let drawW: number;
+  let drawH: number;
+  if (srcRatio > TARGET_RATIO) {
+    drawW = TARGET_W;
+    drawH = Math.round(TARGET_W / srcRatio);
+  } else {
+    drawH = TARGET_H;
+    drawW = Math.round(TARGET_H * srcRatio);
+  }
+  const dx = Math.round((TARGET_W - drawW) / 2);
+  const dy = Math.round((TARGET_H - drawH) / 2);
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  const img = await loadImage(origDataUrl);
+  ctx.drawImage(img, dx, dy, drawW, drawH);
+
+  const blob: Blob = await new Promise((resolve, reject) =>
+    canvas.toBlob(
+      (b) =>
+        b ? resolve(b) : reject(new Error("could not encode normalized image")),
+      "image/jpeg",
+      NORMALIZE_QUALITY,
+    ),
+  );
+
+  // Keep the user's original filename stem so the GCS object name still
+  // reads as "their" creative; just swap to .jpg since we re-encoded.
+  const stem = file.name.replace(/\.[^.]+$/, "") || "creative";
+  const normalized = new File([blob], `${stem}.jpg`, { type: "image/jpeg" });
+  const dataUrl = canvas.toDataURL("image/jpeg", NORMALIZE_QUALITY);
+  return { file: normalized, dataUrl, resized: true };
+}
+
 export default function StepImage({ initial, onComplete }: Props) {
   const api = useApi();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -63,6 +136,8 @@ export default function StepImage({ initial, onComplete }: Props) {
     width: number;
     height: number;
     dataUrl: string;
+    resized: boolean;
+    originalName: string;
   } | null>(null);
   const [uploaded, setUploaded] = useState<CreativeAsset | null>(initial);
   const [clientError, setClientError] = useState<string | null>(null);
@@ -108,23 +183,29 @@ export default function StepImage({ initial, onComplete }: Props) {
       setClientError("Only JPG and PNG are accepted.");
       return;
     }
-    if (file.size > MAX_BYTES) {
+    if (file.size > MAX_INPUT_BYTES) {
       setClientError(
-        `File is ${(file.size / (1024 * 1024)).toFixed(1)} MB — limit is 5 MB.`,
+        `File is ${(file.size / (1024 * 1024)).toFixed(1)} MB — limit is ${(MAX_INPUT_BYTES / (1024 * 1024)).toFixed(0)} MB.`,
       );
       return;
     }
 
     try {
       const { width, height, dataUrl } = await readImage(file);
-      if (width !== REQUIRED_W || height !== REQUIRED_H) {
-        setClientError(
-          `Image must be exactly ${REQUIRED_W}×${REQUIRED_H}px (got ${width}×${height}).`,
-        );
-        return;
-      }
-      setPicked({ file, width, height, dataUrl });
-      upload.mutate(file);
+      const {
+        file: normalizedFile,
+        dataUrl: normalizedDataUrl,
+        resized,
+      } = await normalizeTo1920x1080(file, dataUrl, width, height);
+      setPicked({
+        file: normalizedFile,
+        width: TARGET_W,
+        height: TARGET_H,
+        dataUrl: normalizedDataUrl,
+        resized,
+        originalName: file.name,
+      });
+      upload.mutate(normalizedFile);
     } catch (err) {
       setClientError(err instanceof Error ? err.message : "could not read");
     }
@@ -135,12 +216,14 @@ export default function StepImage({ initial, onComplete }: Props) {
   }
 
   const previewSrc = picked?.dataUrl ?? uploaded?.preview_data_url ?? null;
-  const filename = picked?.file.name ?? uploaded?.filename ?? null;
+  // Display the user's original filename, not the .jpg we re-encoded to.
+  const filename = picked?.originalName ?? uploaded?.filename ?? null;
   const sizeKb =
     picked?.file.size ?? uploaded?.size_bytes
       ? ((picked?.file.size ?? uploaded?.size_bytes ?? 0) / 1024).toFixed(0)
       : null;
   const validated = uploaded !== null && !upload.isPending;
+  const wasResized = picked?.resized ?? false;
   const progressValue =
     upload.isPending && progress !== null
       ? progress
@@ -159,8 +242,9 @@ export default function StepImage({ initial, onComplete }: Props) {
       <div style={{ padding: 22 }}>
         <Lbl>Upload creative</Lbl>
         <div style={{ marginTop: 6, fontSize: 12, color: "var(--tx-2)" }}>
-          JPG or PNG · 1920×1080 · 5 MB max. Hosted publicly on the ad
-          server's GCS bucket and served on partner DOOH screens.
+          JPG or PNG · any size up to 15 MB. We auto-resize to 1920×1080
+          (letterboxed if the aspect ratio differs) before serving on partner
+          DOOH screens.
         </div>
 
         <input
@@ -177,6 +261,7 @@ export default function StepImage({ initial, onComplete }: Props) {
 
         {previewSrc ? (
           <div
+            className="x-img-preview"
             style={{
               marginTop: 14,
               padding: 14,
@@ -249,6 +334,19 @@ export default function StepImage({ initial, onComplete }: Props) {
                 }}
               >
                 {sizeKb && <span>{sizeKb} KB</span>}
+                {wasResized && (
+                  <span
+                    style={{
+                      color: "var(--x402-blue-hi)",
+                      display: "inline-flex",
+                      gap: 4,
+                      alignItems: "center",
+                    }}
+                    title="Auto-resized for 1920×1080 DOOH screens"
+                  >
+                    <Icon name="check" size={11} stroke={2.4} /> resized
+                  </span>
+                )}
                 {validated && (
                   <span
                     style={{

@@ -16,6 +16,7 @@ const TABS: Array<{ id: TabId; label: string }> = [
 export default function TabRow({ tab, onTabChange, onNewCampaign }: Props) {
   return (
     <div
+      className="x-bar-pad"
       style={{
         height: 56,
         padding: "0 28px",

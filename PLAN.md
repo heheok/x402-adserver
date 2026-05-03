@@ -58,6 +58,7 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 - [Session 16.9 — Money refactor: float → integer microUSDC](worklog/session-16.9.md) ✅
 - [Session 17 — Local prod-shape compose (Caddy + multi-stage SPA build)](worklog/session-17.md) ✅
 - [Rebrand to Solboards (2026-05-03) — domain locked, x402-Ad-Server → Solboards across UI/configs/containers/docs/memory; Privy modal themed](worklog/rebrand-2026-05-03.md) ✅
+- [Session 18.7 — Responsive design pass + creative auto-resize + active-campaign shine](worklog/session-18.7.md) ✅
 
 ### Session 18 — Deploy to GCE VM (domain: solboards.xyz)
 
@@ -85,9 +86,9 @@ single GCE e2-small VM running `docker compose -f docker-compose.prod.yml up`. T
 - [ ] Workload Identity for the GCS creatives bucket — defer to post-hackathon; the JSON SA key in `backend/.secrets/` is acceptable for the demo.
 - [ ] Move treasury topup cron (if Circle upgrade landed) from local Windows Task Scheduler to Cloud Scheduler + Cloud Function.
 
-### Session 18.7 — Responsive design pass (3 breakpoints)
+### Session 18.7 — Responsive design pass (3 breakpoints) ✅
 
-Currently desktop-only (was scoped that way through Sessions 13-16). Decision 2026-05-03: do real responsive (not a tactical "doesn't look broken" pass) before submission so the dashboard works on phone + tablet too. Hackathon judges typically review on desktop, but a B2B advertiser dashboard *should* work everywhere, and it's a polish item that pays off post-hackathon if we keep building.
+Shipped 2026-05-03. Detail: `worklog/session-18.7.md`. Summary below; details, findings, and follow-ups in the worklog.
 
 **Breakpoints:**
 
@@ -97,27 +98,28 @@ Currently desktop-only (was scoped that way through Sessions 13-16). Decision 20
 | Tablet  | `640–1023px`   | iPad portrait, phones landscape |
 | Desktop | `≥ 1024px`     | Current design (unchanged)    |
 
-**Implementation approach:**
-
-- Add breakpoint variables + container queries to `frontend/src/styles/tokens.css`. Standard `@media (max-width: 640px)` patterns.
-- Most layouts use inline styles with explicit grid-template-columns / flexbox. Refactor only the grids that break on mobile to utility classes (`.x-grid-2`, `.x-grid-3`, etc. that collapse to single column under the breakpoint), leave per-component styling alone.
-- Test in Chrome devtools' device toolbar at 375px, 768px, 1280px. No actual device required, but a real iPhone smoke-test before shipping helps.
-
 **Per-page scope:**
 
-- [ ] **Login**: trivial (already a centered card), should mostly just work — verify and move on.
-- [ ] **AppHeader**: collapse to a compact mobile shape — logo + wallet chip only, no text. Tablet keeps the current full layout.
-- [ ] **Overview page**: stat-card grid stacks single-column on mobile, 2-col on tablet. Sparklines shrink. "Recent activity" rows already work as flex.
-- [ ] **Campaigns list**: card grid → single column on mobile, 2-col on tablet.
-- [ ] **Campaign wizard (5 steps)**:
-  - StepImage: upload box stays full-width, preview scales.
-  - StepDetails / StepCalculator / StepSchedule: form-row grids collapse to single column.
-  - StepTargeting: DMA pickers + map. **Map kept on all breakpoints** — display-only, no interaction, so no touch-target concerns. Just shrink the map height and let DMA chips wrap.
-  - StepReview: summary table → stacked rows on mobile.
-- [ ] **Live activity map (Overview)**: keep at all breakpoints. Shrink to ~40vh on mobile, full-width.
-- [ ] Wizard sidebar / breadcrumbs: keep horizontal at all sizes (already wraps), just reduce padding on mobile.
+- [x] **Login**: verified at 375px, just works.
+- [x] **AppHeader**: subtitle + devnet badge hidden on mobile via `x-hide-sm`; padding reduced.
+- [x] **Overview**: stat grid 4→2→1, status row wraps to 2x3, activity table drops DMA + Tx columns on mobile (column-hide replaced an earlier horizontal-scroll attempt — see worklog finding).
+- [x] **Campaigns list**: `x-page` wrappers; vertical list, no grid collapse needed.
+- [x] **CampaignCard**: collapsed row restacks (progress drops to row 2, chevron hides); expanded header pushes action group to its own row; stats 6→3→2; targeting/last-play 1fr 1fr → 1-col; settlement table drops Nonce + Publisher on mobile; title + wallet rows get `flex-wrap` so meta items break cleanly between elements (not mid-string).
+- [x] **Campaign wizard**: Modal step labels hidden on mobile (numbered dots stay), StepImage preview restacks chips to a full-width row, StepTargeting 3→2 col, StepSchedule arrow icon hides, StepReview row 160px+1fr stacks, SuccessTx 2-col → 1-col.
+- [x] **Live activity map**: `tokens.css` `.x-map { height: 200px }` at mobile. (Note: PLAN.md previously listed this under "Overview" but the map only lives inside the expanded CampaignCard — there's no Overview-level map in the current design.)
+- [x] Wizard sidebar / breadcrumbs: padding tightens via modal's existing wrap; step dot labels hide.
 
-**Estimate:** 8-12h focused work. Don't start until faucet rate-limit (Session 19's first item) is shipped.
+**Out-of-scope additions shipped in the same pass** (added during the session; both demo-day-critical):
+
+- [x] **Creative auto-resize** (`StepImage.tsx`): client-side canvas normalization to 1920×1080 with scale-fit + black letterbox. Accepts any JPG/PNG up to 15 MB instead of hard-rejecting non-1920×1080 uploads. Re-encodes as JPEG @ 0.92 quality (output ~200-500 KB). Backend's strict 1920×1080 + 5 MB caps stay in place as defense-in-depth and are now always satisfied. UI shows a `✓ resized` chip when normalization happened.
+- [x] **Active-campaign progress shine** (eye-candy): `Progress.shine` prop wires a translucent white sweep across the filled portion of the gradient bar every 3.6s (most of the cycle is held off-screen so it reads as ambient, not busy). Wired on both CampaignCard call sites with `shine={status === "active" && pct > 0}`.
+
+**Sequencing note:** PLAN.md previously said "don't start until faucet rate-limit (Session 19's first item) is shipped." User explicitly overrode that ordering — wanted user-facing demo polish first. Faucet rate-limit still pending and remains the first item in Session 19. Override is risk-free: 18.7 is CSS / className / client-side image normalization only, no backend touch.
+
+**Follow-ups (not blockers, see worklog):**
+
+- Smoke-test on a real iPhone before submission if time permits (devtools simulation isn't pixel-perfect for tap targets / safe areas).
+- WalletChip dropdown panel is hardcoded `width: 320` — would clip at hypothetical 320px viewport (older iPhone SE). Not blocking at our 375px target. Switch to `max-width: calc(100vw - 32px)` if anyone reports it.
 
 ---
 

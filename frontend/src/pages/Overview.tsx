@@ -125,20 +125,20 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
 
   return (
     <div
+      className="x-page"
       style={{
-        padding: "32px 28px 40px",
         display: "flex",
         flexDirection: "column",
         gap: 24,
-        maxWidth: 1200,
-        marginInline: "auto",
       }}
     >
       <div
+        className="x-flex-sm-col"
         style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "flex-end",
+          gap: 12,
         }}
       >
         <div>
@@ -181,6 +181,7 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
 
       {/* Stat grid */}
       <div
+        className="x-grid-md-2 x-grid-sm-1"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(4, 1fr)",
@@ -220,7 +221,7 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
 
       {/* Status breakdown */}
       <div
-        className="x-card"
+        className="x-card x-status-row"
         style={{ display: "flex", overflow: "hidden" }}
       >
         <StatusChip status="active" count={counts.active} />
@@ -305,6 +306,7 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
           </button>
         </div>
         <div
+          className="x-act-row"
           style={{
             display: "grid",
             gridTemplateColumns: "90px 1fr 130px 110px 80px",
@@ -339,7 +341,9 @@ export default function Overview({ onNewCampaign, onJumpToCampaigns }: Props) {
           activity.map((s, i) => (
             <div
               key={s.id}
-              className={flashIds.has(s.id) ? "x-row-flash" : undefined}
+              className={
+                flashIds.has(s.id) ? "x-act-row x-row-flash" : "x-act-row"
+              }
               style={{
                 display: "grid",
                 gridTemplateColumns: "90px 1fr 130px 110px 80px",
@@ -456,13 +460,7 @@ function StatusChip({ status, count }: { status: string; count: number }) {
 
 function Empty({ onNewCampaign }: { onNewCampaign: () => void }) {
   return (
-    <div
-      style={{
-        padding: "32px 28px 40px",
-        maxWidth: 1200,
-        marginInline: "auto",
-      }}
-    >
+    <div className="x-page">
       <div
         className="x-display"
         style={{ fontSize: 28, letterSpacing: "-0.025em" }}
@@ -553,6 +551,7 @@ function Empty({ onNewCampaign }: { onNewCampaign: () => void }) {
       </div>
 
       <div
+        className="x-grid-sm-1"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, 1fr)",
@@ -606,13 +605,11 @@ function Empty({ onNewCampaign }: { onNewCampaign: () => void }) {
 function Skeleton() {
   return (
     <div
+      className="x-page"
       style={{
-        padding: "32px 28px 40px",
         display: "flex",
         flexDirection: "column",
         gap: 24,
-        maxWidth: 1200,
-        marginInline: "auto",
       }}
     >
       <style>{`@keyframes sk-shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }`}</style>
@@ -623,6 +620,7 @@ function Skeleton() {
         </div>
       </div>
       <div
+        className="x-grid-md-2 x-grid-sm-1"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(4, 1fr)",

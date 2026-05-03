@@ -85,6 +85,7 @@ export default function StepTargeting({ initial, onBack, onComplete }: Props) {
 
         {markets.data && (
           <div
+            className="x-grid-sm-2"
             style={{
               marginTop: 14,
               display: "grid",

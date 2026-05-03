@@ -165,6 +165,36 @@ button { font: inherit; color: inherit; }
 }
 .x-pulse { animation: x-pulse 1.6s ease-in-out infinite; }
 
+/* Shine sweep for live/active campaign progress bars. The pseudo-element
+   sits inside the filled portion; ::after's 100% width = filled width, so
+   the highlight only runs across the spent fraction, never the empty track.
+   Long pause between sweeps keeps it ambient rather than busy. */
+@keyframes x-progress-shine {
+  0%, 35%   { transform: translateX(-100%); }
+  75%, 100% { transform: translateX(100%); }
+}
+.x-progress-shine {
+  position: relative;
+  overflow: hidden;
+}
+.x-progress-shine::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 100%
+  );
+  animation: x-progress-shine 3.6s ease-in-out infinite;
+  pointer-events: none;
+  will-change: transform;
+}
+
 /* Soft teal flash for newly-arrived rows in lists (e.g. activity feed). */
 @keyframes x-row-flash {
   0%   { background-color: rgba(20,241,149,0.18); }
@@ -268,4 +298,160 @@ button { font: inherit; color: inherit; }
   line-height: 1;
   text-transform: uppercase;
   opacity: 0.78;
+}
+
+/* Responsive breakpoints (Session 18.7) ------------------------------------
+   Mobile  : < 640px
+   Tablet  : 640–1023px
+   Desktop : >= 1024px (current design, untouched)
+
+   The dashboard is built primarily with inline styles. These utility classes
+   override grid-template-columns at smaller breakpoints via !important so
+   components can opt into a collapse without restructuring their JSX. Apply
+   alongside the existing inline grid style. */
+
+/* Page-level container — handles outer padding + max-width + center.
+   Replaces ad-hoc `padding: 32px 28px; maxWidth: 1200; marginInline: auto`. */
+.x-page {
+  padding: 32px 28px 40px;
+  max-width: 1200px;
+  margin-inline: auto;
+}
+@media (max-width: 1023px) {
+  .x-page { padding: 28px 22px 36px; }
+}
+@media (max-width: 639px) {
+  .x-page { padding: 20px 16px 28px; }
+}
+
+/* Tablet-and-below grid collapses (apply with inline desktop grid). */
+@media (max-width: 1023px) {
+  .x-grid-md-3 { grid-template-columns: repeat(3, 1fr) !important; }
+  .x-grid-md-2 { grid-template-columns: repeat(2, 1fr) !important; }
+  .x-grid-md-1 { grid-template-columns: 1fr !important; }
+}
+/* Mobile-only collapses. */
+@media (max-width: 639px) {
+  .x-grid-sm-2 { grid-template-columns: repeat(2, 1fr) !important; }
+  .x-grid-sm-1 { grid-template-columns: 1fr !important; }
+  .x-flex-sm-col { flex-direction: column !important; align-items: stretch !important; }
+  .x-hide-sm { display: none !important; }
+}
+
+/* AppHeader / TabRow horizontal padding on mobile */
+@media (max-width: 639px) {
+  .x-bar-pad { padding-left: 16px !important; padding-right: 16px !important; }
+}
+
+/* Map shrinks on mobile (display-only, no interaction concerns) */
+@media (max-width: 639px) {
+  .x-map { height: 200px; }
+}
+
+/* Settlement / activity tables — drop secondary columns on mobile so the
+   remaining cells fit without a horizontal scrollbar. Tablet/desktop keep
+   the full grid (the natural widths already fit at >=640px in our layouts). */
+
+/* Overview "Recent activity" row — 5 cells: When / Campaign / DMA / Amount / Tx */
+@media (max-width: 639px) {
+  .x-act-row {
+    grid-template-columns: 78px 1fr 88px !important;
+  }
+  .x-act-row > :nth-child(3),  /* DMA */
+  .x-act-row > :nth-child(5) { /* Tx */
+    display: none !important;
+  }
+}
+
+/* CampaignCard "Recent settlements" row — 6 cells: When / Nonce / DMA / Publisher / Amount / Tx */
+@media (max-width: 639px) {
+  .x-stl-row {
+    grid-template-columns: 64px 1fr 88px 70px !important;
+  }
+  .x-stl-row > :nth-child(2),  /* Nonce */
+  .x-stl-row > :nth-child(4) { /* Publisher */
+    display: none !important;
+  }
+}
+
+/* StepReview row: desktop is 160px label + 1fr value; mobile stacks with
+   value left-aligned. */
+@media (max-width: 639px) {
+  .x-review-row { grid-template-columns: 1fr !important; gap: 4px !important; }
+  .x-review-row > :last-child { text-align: left !important; }
+}
+
+/* StepSchedule arrow icon column hides on mobile when fields stack. */
+@media (max-width: 639px) {
+  .x-sched-grid { grid-template-columns: 1fr !important; }
+  .x-sched-grid > .x-sched-arrow { display: none !important; }
+}
+
+/* CampaignCard collapsed row — at mobile drop the progress column to a
+   second row spanning full width, hide the chevron. Uses grid-areas so
+   children stay in source order. */
+@media (max-width: 639px) {
+  .x-camp-collapsed {
+    grid-template-columns: 40px 1fr !important;
+    grid-template-areas: "thumb info" "progress progress" !important;
+    row-gap: 12px !important;
+  }
+  .x-camp-collapsed > :nth-child(1) { grid-area: thumb; }
+  .x-camp-collapsed > :nth-child(2) { grid-area: info; }
+  .x-camp-collapsed > :nth-child(3) { grid-area: progress; }
+  .x-camp-collapsed > :nth-child(4) { display: none; }
+}
+
+/* StepImage preview — at mobile, drop content (filename + chips + progress)
+   to a second row spanning the full width so chips don't get crushed. Thumb
+   stays small on row 1 with the replace button on the right. */
+@media (max-width: 639px) {
+  .x-img-preview { flex-wrap: wrap !important; row-gap: 12px !important; }
+  .x-img-preview > :nth-child(2) {
+    flex-basis: 100% !important;
+    order: 2 !important;
+    min-width: 0 !important;
+  }
+  .x-img-preview > :nth-child(3) {
+    margin-left: auto !important;
+  }
+}
+
+/* CampaignCard expanded header — at mobile push the action button group
+   to a second row so the campaign name and wallet info get full width. */
+@media (max-width: 639px) {
+  .x-camp-expanded-head {
+    grid-template-columns: 64px 1fr !important;
+    grid-template-areas: "thumb info" "actions actions" !important;
+    row-gap: 14px !important;
+  }
+  .x-camp-expanded-head > :nth-child(1) { grid-area: thumb; }
+  .x-camp-expanded-head > :nth-child(2) { grid-area: info; }
+  .x-camp-expanded-head > :nth-child(3) {
+    grid-area: actions;
+    justify-content: flex-start !important;
+  }
+}
+
+/* Status breakdown row (Overview) — 5 flex cells of `flex:1` with vertical
+   dividers. On mobile, wrap into rows of three / two and swap to bottom
+   borders so the dividers still read as separators. */
+@media (max-width: 639px) {
+  .x-status-row {
+    flex-wrap: wrap !important;
+  }
+  .x-status-row > * {
+    flex: 1 1 50% !important;
+    min-width: 0 !important;
+    border-right: none !important;
+    border-bottom: 1px solid var(--line-1) !important;
+  }
+  .x-status-row > :nth-child(odd) {
+    border-right: 1px solid var(--line-1) !important;
+  }
+  .x-status-row > :last-child {
+    flex-basis: 100% !important;
+    border-right: none !important;
+    border-bottom: none !important;
+  }
 }

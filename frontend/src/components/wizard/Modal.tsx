@@ -189,6 +189,7 @@ function StepDots({ current }: { current: StepId }) {
                 {done ? <Icon name="check" size={11} stroke={2.4} /> : s.id}
               </div>
               <span
+                className="x-hide-sm"
                 style={{
                   fontSize: 11,
                   color: active ? "var(--tx-0)" : "var(--tx-2)",

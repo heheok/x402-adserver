@@ -240,6 +240,7 @@ export default function StepReview({
           </div>
 
           <div
+            className="x-grid-sm-1"
             style={{
               marginTop: 22,
               display: "grid",
@@ -531,6 +532,7 @@ function ReviewRow({
 }) {
   return (
     <div
+      className="x-review-row"
       style={{
         display: "grid",
         gridTemplateColumns: "160px 1fr",

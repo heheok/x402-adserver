@@ -53,13 +53,11 @@ export default function Campaigns({ onNewCampaign, highlightId }: Props) {
   if (campaigns.isLoading) {
     return (
       <div
+        className="x-page"
         style={{
-          padding: "32px 28px",
           color: "var(--tx-2)",
           fontFamily: "var(--font-mono)",
           fontSize: 12,
-          maxWidth: 1200,
-          marginInline: "auto",
         }}
       >
         loading…
@@ -69,9 +67,7 @@ export default function Campaigns({ onNewCampaign, highlightId }: Props) {
 
   if (campaigns.isError) {
     return (
-      <div
-        style={{ padding: "32px 28px", maxWidth: 1200, marginInline: "auto" }}
-      >
+      <div className="x-page">
         <p
           style={{
             color: "var(--st-expired)",
@@ -96,13 +92,7 @@ export default function Campaigns({ onNewCampaign, highlightId }: Props) {
   const totalBudgetMicro = sumMicro(rows.map((c) => c.budget));
 
   return (
-    <div
-      style={{
-        padding: "32px 28px 40px",
-        maxWidth: 1200,
-        marginInline: "auto",
-      }}
-    >
+    <div className="x-page">
       <div
         style={{
           display: "flex",
@@ -142,13 +132,7 @@ export default function Campaigns({ onNewCampaign, highlightId }: Props) {
 
 function Empty({ onNewCampaign }: { onNewCampaign: () => void }) {
   return (
-    <div
-      style={{
-        padding: "32px 28px 40px",
-        maxWidth: 1200,
-        marginInline: "auto",
-      }}
-    >
+    <div className="x-page">
       <div
         className="x-display"
         style={{ fontSize: 28, letterSpacing: "-0.025em" }}

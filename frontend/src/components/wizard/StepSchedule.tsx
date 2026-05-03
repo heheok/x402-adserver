@@ -87,6 +87,7 @@ export default function StepSchedule({ initial, onBack, onComplete }: Props) {
         </div>
 
         <div
+          className="x-sched-grid"
           style={{
             marginTop: 14,
             display: "grid",
@@ -101,7 +102,9 @@ export default function StepSchedule({ initial, onBack, onComplete }: Props) {
             min={today}
             onChange={setStart}
           />
-          <Icon name="arrowRight" size={14} />
+          <span className="x-sched-arrow" style={{ display: "inline-flex" }}>
+            <Icon name="arrowRight" size={14} />
+          </span>
           <DateField
             label="End date"
             value={end}

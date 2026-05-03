@@ -4,6 +4,7 @@ import BrandMark from "./ui/BrandMark";
 export default function AppHeader() {
   return (
     <header
+      className="x-bar-pad"
       style={{
         height: 64,
         padding: "0 28px",
@@ -15,7 +16,7 @@ export default function AppHeader() {
         zIndex: 5,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <BrandMark size={22} />
         <div
           style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}
@@ -27,6 +28,7 @@ export default function AppHeader() {
             solboards
           </span>
           <span
+            className="x-hide-sm"
             style={{
               fontSize: 10,
               color: "var(--tx-2)",
@@ -40,6 +42,7 @@ export default function AppHeader() {
           </span>
         </div>
         <span
+          className="x-hide-sm"
           style={{
             marginLeft: 14,
             padding: "3px 7px",
