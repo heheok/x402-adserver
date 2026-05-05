@@ -86,6 +86,17 @@ class Settings(BaseSettings):
     creative_required_width: int = 1920
     creative_required_height: int = 1080
 
+    # Content moderation via Vertex AI Gemini (Session 19.5). Auth uses the SA
+    # JSON at moderation_credentials_json — separate SA from the GCS uploader,
+    # bound only to roles/aiplatform.user (least privilege). MODERATION_ENABLED=
+    # false short-circuits to "approve" for dev / e2e_demo paths so test runs
+    # don't burn Vertex quota or require the SA JSON to be present.
+    moderation_enabled: bool = True
+    moderation_model: str = "gemini-2.5-flash"
+    vertex_project_id: str = ""
+    vertex_location: str = "us-central1"
+    moderation_credentials_json: str = ""
+
     # Demo CPM lock + frequency constants (Session 15). The advertiser does not
     # set CPM — it's $0.50 USD = $0.0005/play. Operating hours + plays/hour
     # combine to plays_per_screen_per_day = 144 (12h × 12 plays/h, one play

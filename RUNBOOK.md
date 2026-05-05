@@ -1043,6 +1043,79 @@ is the safe default we use everywhere).
 
 ---
 
+## Content moderation (Vertex AI)
+
+Each upload to `/api/creatives` is classified by Gemini 2.5 Flash via Vertex AI
+against a three-tier policy (auto-reject NSFW/scam/quality, review for
+alcohol/political/competitor brands, approve otherwise). Auth is a dedicated
+service account `x402-moderation-classifier` bound only to
+`roles/aiplatform.user` (least privilege — separate from the GCS uploader SA).
+
+### One-time provisioning (CMD)
+
+```cmd
+gcloud config set project x402-494608
+
+gcloud services enable aiplatform.googleapis.com
+
+gcloud iam service-accounts create x402-moderation-classifier --display-name="x402 moderation classifier (Vertex AI)"
+
+gcloud projects add-iam-policy-binding x402-494608 --member="serviceAccount:x402-moderation-classifier@x402-494608.iam.gserviceaccount.com" --role=roles/aiplatform.user
+
+if not exist backend\.secrets mkdir backend\.secrets
+gcloud iam service-accounts keys create backend\.secrets\moderation-classifier-sa.json --iam-account=x402-moderation-classifier@x402-494608.iam.gserviceaccount.com
+```
+
+### `.env` lines
+
+```
+MODERATION_ENABLED=true
+MODERATION_MODEL=gemini-2.5-flash
+VERTEX_PROJECT_ID=x402-494608
+VERTEX_LOCATION=us-central1
+MODERATION_CREDENTIALS_JSON=/app/.secrets/moderation-classifier-sa.json
+```
+
+### Disable for local dev
+
+`MODERATION_ENABLED=false` short-circuits to instant approve — use this for
+`scripts/e2e_demo.py` runs and any local work where you don't want to burn
+Vertex quota or load the SA key.
+
+### Inspect moderation rows
+
+```bash
+# Default = pending review queue
+docker exec solboards-backend python scripts/list_pending_moderation.py
+
+# Other filters
+docker exec solboards-backend python scripts/list_pending_moderation.py --status reject
+docker exec solboards-backend python scripts/list_pending_moderation.py --status all --limit 200
+docker exec solboards-backend python scripts/list_pending_moderation.py --advertiser did:privy:abc...
+docker exec solboards-backend python scripts/list_pending_moderation.py --id <creative_id>
+```
+
+Read-only this session — manual approve/reject CLIs are deferred. Until then,
+the dashboard advertiser sees their `review` upload succeed and the campaign
+launches normally; the row is just visible to the operator.
+
+### Cost expectations
+
+Per-image: ~2k input tokens (1080p image + system policy prompt) + ~150 output
+tokens at Gemini 2.5 Flash rates ($0.30/M in, $2.50/M out) = **~$0.001/image**.
+At hackathon volume (dozens of uploads) the entire bill is sub-dollar. See
+`worklog/session-19.5.md` for the full pricing comparison vs. Vision API.
+
+### Rotate the SA key
+
+```cmd
+gcloud iam service-accounts keys create backend\.secrets\moderation-classifier-sa.json --iam-account=x402-moderation-classifier@x402-494608.iam.gserviceaccount.com
+```
+
+Then `docker compose up -d --force-recreate backend`.
+
+---
+
 ## Privy sanity check
 
 Confirms the Privy app still has server-wallet access.
@@ -1191,6 +1264,11 @@ Set in `backend/.env` (copy from `backend/.env.example` to start).
 | `AUTO_PLAY_PLAYS_PER_TICK_MAX`    | Plays per tick upper bound (default 1)                    | 16             |
 | `GCS_BUCKET_NAME`                 | Public-read GCS bucket for advertiser creatives           | 13             |
 | `GCS_CREDENTIALS_JSON`            | Container path to GCS service-account JSON                | 13             |
+| `MODERATION_ENABLED`              | If false, skip Vertex AI call and auto-approve            | 19.5           |
+| `MODERATION_MODEL`                | Vertex Gemini model id (default `gemini-2.5-flash`)       | 19.5           |
+| `VERTEX_PROJECT_ID`               | GCP project for Vertex AI calls                           | 19.5           |
+| `VERTEX_LOCATION`                 | Vertex region (default `us-central1`)                     | 19.5           |
+| `MODERATION_CREDENTIALS_JSON`     | Container path to the moderation classifier SA key        | 19.5           |
 | `DEMO_CPM`                        | Locked CPM in USD (default 0.5 = $0.0005/play)            | 15             |
 | `OPERATING_HOURS_PER_DAY`         | Frequency constant; default 12                            | 15             |
 | `PLAYS_PER_HOUR_PER_SCREEN`       | Frequency constant; default 12 (one every 5 min)          | 15             |

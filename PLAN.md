@@ -60,6 +60,7 @@ Each session is ~1 working block. Order is the dependency chain — later sessio
 - [Rebrand to Solboards (2026-05-03) — domain locked, x402-Ad-Server → Solboards across UI/configs/containers/docs/memory; Privy modal themed](worklog/rebrand-2026-05-03.md) ✅
 - [Session 18 — Deploy to GCE VM (solboards.xyz) — Cloudflare orange-cloud + Origin Cert, nightly SQLite → GCS backup](worklog/session-18.md) ✅
 - [Session 18.7 — Responsive design pass + creative auto-resize + active-campaign shine](worklog/session-18.7.md) ✅
+- [Session 19.5 — Automated content moderation (Vertex AI + Gemini 2.5 Flash)](worklog/session-19.5.md) ✅
 
 ### Session 19 — Pre-demo polish + submission
 

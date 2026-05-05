@@ -24,6 +24,14 @@ export function humanizeError(err: unknown): string {
           )
           .join("; ");
       }
+      // Structured detail object (e.g. moderation rejects send
+      // {error, message, categories_flagged, reasons}). Components that want
+      // rich rendering use parseModerationReject() below; everyone else gets
+      // the message string here.
+      if (detail && typeof detail === "object" && "message" in detail) {
+        const msg = (detail as { message?: unknown }).message;
+        if (typeof msg === "string") return msg;
+      }
     }
     if (typeof data === "string" && data.length > 0) return data;
     if (err.code === "ERR_NETWORK") {
@@ -45,4 +53,42 @@ export function humanizeError(err: unknown): string {
     return err.message;
   }
   return String(err);
+}
+
+/**
+ * Recognize moderation-reject 422 responses from POST /api/creatives.
+ * Returns the structured payload for rich rendering, or null if the error
+ * is something else.
+ */
+export function parseModerationReject(err: unknown): {
+  message: string;
+  categories: string[];
+  reasons: string[];
+} | null {
+  if (!isAxiosError(err) || err.response?.status !== 422) return null;
+  const detail = (err.response.data as { detail?: unknown })?.detail;
+  if (
+    !detail ||
+    typeof detail !== "object" ||
+    (detail as { error?: unknown }).error !== "moderation_rejected"
+  ) {
+    return null;
+  }
+  const d = detail as {
+    message?: unknown;
+    categories_flagged?: unknown;
+    reasons?: unknown;
+  };
+  return {
+    message:
+      typeof d.message === "string"
+        ? d.message
+        : "Creative rejected by content moderation.",
+    categories: Array.isArray(d.categories_flagged)
+      ? d.categories_flagged.filter((x): x is string => typeof x === "string")
+      : [],
+    reasons: Array.isArray(d.reasons)
+      ? d.reasons.filter((x): x is string => typeof x === "string")
+      : [],
+  };
 }

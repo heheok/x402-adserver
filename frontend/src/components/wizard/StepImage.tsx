@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 
 import { useApi } from "../../lib/api";
-import { humanizeError } from "../../lib/errors";
+import { humanizeError, parseModerationReject } from "../../lib/errors";
 import Icon from "../ui/Icon";
 import Progress from "../ui/Progress";
 import { Footer, Lbl } from "./Modal";
@@ -24,6 +24,11 @@ type CreativeUploadResponse = {
   width: number;
   height: number;
   format: string;
+  // Session 19.5 — present on every 200. "approve" = clean, "review" = stored
+  // but flagged for admin (campaign still launches). Reject responses are 422.
+  moderation_status?: "approve" | "review";
+  moderation_categories?: string[];
+  moderation_reasons?: string[];
 };
 
 export type CreativeAsset = {
@@ -32,6 +37,9 @@ export type CreativeAsset = {
   preview_data_url: string;
   filename: string;
   size_bytes: number;
+  moderation_status?: "approve" | "review";
+  moderation_categories?: string[];
+  moderation_reasons?: string[];
 };
 
 type Props = {
@@ -167,6 +175,9 @@ export default function StepImage({ initial, onComplete }: Props) {
         preview_data_url: picked?.dataUrl ?? "",
         filename: picked?.file.name ?? "creative",
         size_bytes: picked?.file.size ?? 0,
+        moderation_status: data.moderation_status ?? "approve",
+        moderation_categories: data.moderation_categories ?? [],
+        moderation_reasons: data.moderation_reasons ?? [],
       };
       setUploaded(asset);
     },
@@ -224,18 +235,34 @@ export default function StepImage({ initial, onComplete }: Props) {
       : null;
   const validated = uploaded !== null && !upload.isPending;
   const wasResized = picked?.resized ?? false;
-  const progressValue =
-    upload.isPending && progress !== null
-      ? progress
-      : upload.isSuccess
-        ? 1
-        : 0;
-  const progressLabel =
-    upload.isPending && progress !== null && progress < 1
-      ? `Uploading… ${Math.round(progress * 100)}%`
+  // Phase machine: distinguishes the (fast, determinate) browser→backend
+  // upload from the (slow, server-side) moderation review. Each phase gets
+  // a different bar treatment + label so the "we're checking with the
+  // moderator" pause doesn't read as a stalled upload.
+  type Phase = "idle" | "uploading" | "validating" | "validated";
+  const phase: Phase = !upload.isPending && validated
+    ? "validated"
+    : upload.isPending && progress !== null && progress < 1
+      ? "uploading"
       : upload.isPending
-        ? "Validating on server…"
+        ? "validating"
+        : "idle";
+  const progressValue = phase === "validated" ? 1 : phase === "uploading" ? (progress ?? 0) : 0;
+  const progressColor =
+    phase === "validated"
+      ? "var(--sol-teal)"
+      : phase === "validating"
+        ? "#8b5cf6"
+        : "var(--tint-grad-strong)";
+  const progressIndeterminate = phase === "validating";
+  const progressLabel =
+    phase === "uploading"
+      ? `Uploading… ${Math.round((progress ?? 0) * 100)}%`
+      : phase === "validating"
+        ? "Moderation review in progress"
         : null;
+  const progressSubLabel =
+    phase === "validating" ? "automated content check · ~5s" : null;
 
   return (
     <>
@@ -363,9 +390,8 @@ export default function StepImage({ initial, onComplete }: Props) {
               <div style={{ marginTop: 8 }}>
                 <Progress
                   value={progressValue}
-                  color={
-                    validated ? "var(--sol-teal)" : "var(--tint-grad-strong)"
-                  }
+                  color={progressColor}
+                  indeterminate={progressIndeterminate}
                 />
               </div>
             </div>
@@ -440,11 +466,25 @@ export default function StepImage({ initial, onComplete }: Props) {
             style={{
               marginTop: 8,
               fontSize: 11,
+              color: phase === "validating" ? "#8b5cf6" : "var(--tx-2)",
+              fontFamily: "var(--font-mono)",
+              fontWeight: phase === "validating" ? 600 : 400,
+              letterSpacing: phase === "validating" ? 0.3 : 0,
+            }}
+          >
+            {progressLabel}
+          </div>
+        )}
+        {progressSubLabel && (
+          <div
+            style={{
+              marginTop: 2,
+              fontSize: 10,
               color: "var(--tx-2)",
               fontFamily: "var(--font-mono)",
             }}
           >
-            {progressLabel}
+            {progressSubLabel}
           </div>
         )}
         {clientError && (
@@ -459,17 +499,113 @@ export default function StepImage({ initial, onComplete }: Props) {
             {clientError}
           </p>
         )}
-        {upload.isError && (
-          <p
+        {upload.isError &&
+          (() => {
+            const reject = parseModerationReject(upload.error);
+            if (reject) {
+              return (
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: 12,
+                    borderRadius: 8,
+                    border: "1px solid var(--st-expired)",
+                    background: "rgba(220, 38, 38, 0.06)",
+                    fontSize: 12,
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--st-expired)",
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                    Creative rejected by content moderation
+                  </div>
+                  {reject.categories.length > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 4,
+                        marginBottom: 6,
+                      }}
+                    >
+                      {reject.categories.map((c) => (
+                        <span
+                          key={c}
+                          style={{
+                            padding: "1px 6px",
+                            borderRadius: 4,
+                            background: "rgba(220, 38, 38, 0.15)",
+                            fontSize: 10,
+                          }}
+                        >
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {reject.reasons.length > 0 && (
+                    <ul style={{ margin: 0, paddingLeft: 16 }}>
+                      {reject.reasons.map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <div style={{ marginTop: 6, color: "var(--tx-2)" }}>
+                    Try a different creative.
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <p
+                style={{
+                  marginTop: 10,
+                  fontSize: 12,
+                  color: "var(--st-expired)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                {humanizeError(upload.error)}
+              </p>
+            );
+          })()}
+        {uploaded?.moderation_status === "review" && (
+          <div
             style={{
-              marginTop: 10,
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 8,
+              border: "1px solid var(--st-paused, #d97706)",
+              background: "rgba(217, 119, 6, 0.08)",
               fontSize: 12,
-              color: "var(--st-expired)",
               fontFamily: "var(--font-mono)",
+              color: "var(--st-paused, #d97706)",
             }}
           >
-            {humanizeError(upload.error)}
-          </p>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              Submitted for review
+            </div>
+            <div style={{ color: "var(--tx-2)", marginBottom: 6 }}>
+              Campaign can launch — admin will be notified to review.
+            </div>
+            {(uploaded.moderation_categories ?? []).length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                {(uploaded.moderation_categories ?? []).map((c) => (
+                  <span
+                    key={c}
+                    style={{
+                      padding: "1px 6px",
+                      borderRadius: 4,
+                      background: "rgba(217, 119, 6, 0.15)",
+                      fontSize: 10,
+                    }}
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
       <Footer

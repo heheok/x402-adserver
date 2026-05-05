@@ -465,14 +465,33 @@ commercialize.)
     land before multi-worker deployment or any third-party publisher access.
 16. **Creative content moderation.** Once advertisers can upload creatives
     to our public GCS bucket (§5 Creative hosting), we are responsible for
-    what gets served on partner publisher screens. Today: zero filtering
-    beyond MIME + dimension validation. Pre-mainnet, at minimum: an
-    NSFW/safety classifier on upload (Sightengine, AWS Rekognition Content
-    Moderation, or similar managed API), a manual review queue for flagged
-    items, and a takedown path for post-publication complaints. Ideally
-    per-publisher brand-safety rules layered on top. Cost depends on
-    managed-API choice — back-of-envelope $0.001–$0.005 per upload at
-    Rekognition/Sightengine pricing, manageable.
+    what gets served on partner publisher screens.
+
+    **Shipped Session 19.5 (2026-05-05):** Vertex AI Gemini 2.5 Flash
+    classifier on every upload, three-tier policy (auto-reject NSFW / violence
+    / hate / illegal-drugs / scam / deceptive-UI / quality / IP-infringement;
+    review for alcohol / tobacco / cannabis / gambling / pharma / political /
+    religious / firearms / competitor-crypto-brand; approve otherwise). Reject
+    blocks the upload before GCS write and returns 422 with structured
+    reasons; review uploads to GCS but persists a `moderations` row admins
+    can inspect via `scripts/list_pending_moderation.py`. Dedicated SA
+    `x402-moderation-classifier` (least privilege — `roles/aiplatform.user`
+    only). Cost ~$0.001/image. `MODERATION_ENABLED=false` short-circuits for
+    local dev / e2e_demo.
+
+    **Still deferred pre-mainnet:**
+    - **Manual review queue actions** — Session 19.5 ships read-only
+      listing; admin approve/reject CLIs (writes to
+      `moderations.reviewed_by` / `review_decision`) are a follow-up.
+    - **Takedown path for post-publication complaints** — flagging a
+      live creative and yanking it from rotation. Requires a publisher-
+      facing admin UI plus a `takedowns` log.
+    - **Per-publisher brand-safety rules** — venue-aware Tier 2 enforcement
+      (alcohol fine for bars, not for cafes near schools). Currently Tier 2
+      always routes to review; venue rules are post-hackathon.
+    - **Repeat-offender detection** — moderations rows are persisted including
+      rejects, but we don't yet aggregate them per advertiser to throttle or
+      block repeat bad actors.
 
 ---
 

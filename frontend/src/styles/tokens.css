@@ -195,6 +195,20 @@ button { font: inherit; color: inherit; }
   will-change: transform;
 }
 
+/* Indeterminate progress: a 35%-wide segment slides L→R→L across the
+   track. Used when the duration is unknown (e.g. server-side moderation
+   review). Distinct from .x-progress-shine which sweeps a highlight inside
+   a filled bar. */
+@keyframes x-progress-indeterminate {
+  0%   { left: -35%; width: 35%; }
+  50%  { left: 35%;  width: 50%; }
+  100% { left: 100%; width: 35%; }
+}
+.x-progress-indeterminate {
+  animation: x-progress-indeterminate 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  will-change: left, width;
+}
+
 /* Soft teal flash for newly-arrived rows in lists (e.g. activity feed). */
 @keyframes x-row-flash {
   0%   { background-color: rgba(20,241,149,0.18); }

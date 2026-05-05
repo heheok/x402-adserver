@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from enum import Enum
 
-from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Integer, String
+from sqlalchemy import JSON, BigInteger, Date, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -144,3 +144,39 @@ class FaucetClaim(Base):
         String, default=FaucetClaimStatus.PENDING.value, index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ModerationVerdict(str, Enum):
+    APPROVE = "approve"
+    REVIEW = "review"
+    REJECT = "reject"
+
+
+class Moderation(Base):
+    """Per-creative moderation row written by /api/creatives (Session 19.5).
+
+    Persisted for all three verdicts including reject — keeps an audit trail
+    for repeat-offender detection later. creative_id matches the uuid hex in
+    the GCS object name; creative_url is denormalized so admin scripts don't
+    need to recompute it.
+    """
+
+    __tablename__ = "moderations"
+
+    creative_id: Mapped[str] = mapped_column(String, primary_key=True)
+    creative_url: Mapped[str] = mapped_column(String)
+    advertiser_id: Mapped[str] = mapped_column(String, index=True)
+    verdict: Mapped[str] = mapped_column(
+        String, default=ModerationVerdict.APPROVE.value, index=True
+    )
+    categories_flagged: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reasons: Mapped[list[str]] = mapped_column(JSON, default=list)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Manual review bookkeeping — populated when an admin overrides the
+    # auto-verdict. Not used in Session 19.5; admin script is read-only.
+    reviewed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    review_decision: Mapped[str | None] = mapped_column(String, nullable=True)
