@@ -697,47 +697,50 @@ async def refund_campaign(
     db.refresh(c)
 
     remaining_micro = int(c.budget) - int(c.spent)
-    if remaining_micro <= 0:
-        c.status = CampaignStatus.REFUNDED.value
-        db.commit()
-        return RefundResponse(refund_amount=micro_str(0), tx_hash=None, solscan_url=None)
-
-    if not c.advertiser_wallet:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="advertiser_wallet missing on campaign — cannot refund",
-        )
 
     settings = get_settings()
-    try:
-        tx_b64 = await build_usdc_transfer_tx(
-            from_address=c.wallet_address,
-            to_address=c.advertiser_wallet,
-            amount_micro=remaining_micro,
-        )
-        tx_hash = await privy.sign_and_send_solana(
-            wallet_id=c.wallet_id,
-            transaction_base64=tx_b64,
-            reference_id=f"refund-{c.id}",
-        )
-    except PrivyError as e:
-        logger.exception("refund failed for campaign=%s wallet=%s", c.id, c.wallet_id)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    tx_hash: str | None = None
+    if remaining_micro > 0:
+        if not c.advertiser_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="advertiser_wallet missing on campaign — cannot refund",
+            )
+        try:
+            tx_b64 = await build_usdc_transfer_tx(
+                from_address=c.wallet_address,
+                to_address=c.advertiser_wallet,
+                amount_micro=remaining_micro,
+            )
+            tx_hash = await privy.sign_and_send_solana(
+                wallet_id=c.wallet_id,
+                transaction_base64=tx_b64,
+                reference_id=f"refund-{c.id}",
+            )
+        except PrivyError as e:
+            logger.exception("refund failed for campaign=%s wallet=%s", c.id, c.wallet_id)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     c.status = CampaignStatus.REFUNDED.value
     c.refund_tx_hash = tx_hash
     db.commit()
 
-    # Best-effort SOL sweep back to treasury. The campaign wallet was
-    # right-sized at creation (services/calc.required_sol_seed_lamports);
-    # whatever didn't get burned on validator fees over the campaign's
-    # life should return to treasury rather than sit stranded forever
-    # (Privy doesn't support wallet deletion).
+    # Best-effort SOL sweep back to treasury. Runs unconditionally on every
+    # refund — campaigns that drain to zero via settles still hold their
+    # unburned seed SOL, and skipping the sweep there leaks the full seed
+    # (Privy can't delete wallets, so the lamports sit stranded forever).
+    #
+    # Buffer is 50k lamports (~$0.01) — a tighter 10k buffer was observed
+    # to lose to devnet RPC replica lag: get_sol_lamports occasionally
+    # returns a pre-tx balance from a lagging read-replica, the sweep tx
+    # then asks for too much, and the broadcast fails with `insufficient
+    # lamports` off-by-fee. 50k = 1 fee + 9 fees of lag headroom.
     if settings.treasury_wallet_address:
         try:
-            await wait_for_tx_confirmation(tx_hash, timeout_seconds=30.0)
+            if tx_hash:
+                await wait_for_tx_confirmation(tx_hash, timeout_seconds=30.0)
             sol_lamports = await get_sol_lamports(c.wallet_address)
-            sweep_lamports = max(0, sol_lamports - 10_000)  # leave 2 fees worth
+            sweep_lamports = max(0, sol_lamports - 50_000)
             if sweep_lamports > 0:
                 sol_tx_b64 = await build_sol_transfer_tx(
                     from_address=c.wallet_address,
@@ -763,7 +766,7 @@ async def refund_campaign(
             )
 
     return RefundResponse(
-        refund_amount=micro_str(remaining_micro),
+        refund_amount=micro_str(remaining_micro if remaining_micro > 0 else 0),
         tx_hash=tx_hash,
         solscan_url=_solscan_tx_url(tx_hash),
     )
