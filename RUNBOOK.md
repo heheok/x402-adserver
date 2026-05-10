@@ -297,6 +297,43 @@ docker compose run --rm backend python scripts/check_balance.py
 
 ---
 
+## Reclaim stranded SOL from terminated campaign wallets
+
+Privy can't delete wallets, so every campaign that reaches a terminal status
+(REFUNDED, COMPLETED, EXPIRED) leaves its unburned seed SOL stranded on-chain
+unless something sweeps it. As of 2026-05-10 the live `/refund` handler does
+this automatically (see PLAN.md "SOL gas subsidy model — refund-time leak");
+the script below recovers SOL stranded **before** that fix and from
+COMPLETED/EXPIRED campaigns that never had refund clicked.
+
+```bash
+# Dry-run (default) — prints what would happen, no on-chain txs.
+docker compose run --rm backend python scripts/recover_refunded_sol.py
+
+# Sanity-check on one campaign before bulk:
+docker compose run --rm backend python scripts/recover_refunded_sol.py \
+    --campaign-id <id> --execute
+
+# Bulk execute:
+docker compose run --rm backend python scripts/recover_refunded_sol.py --execute
+
+# Restrict to one terminal status:
+docker compose run --rm backend python scripts/recover_refunded_sol.py \
+    --status completed
+```
+
+Filters: `status IN (refunded, completed, expired)` only. EXPIRED wallets
+with on-chain USDC > $0.001 are skipped (they need a refund click first —
+that path moves the USDC AND sweeps the SOL). Active/paused/draft are
+never touched. Idempotent: re-running on a swept wallet is a no-op.
+Per-campaign try/except so one bad row doesn't kill the run. Leaves a
+1,000,000-lamport buffer per wallet (~$0.20 mainnet, dust on devnet).
+
+ATA rent (~2,039,280 lamports/wallet) is **not** recovered by this script —
+the USDC token account stays open. See PLAN.md for the deferred ATA-close work.
+
+---
+
 ## Treasury lifecycle
 
 ### Create a new treasury wallet (first time, or after rotating)
